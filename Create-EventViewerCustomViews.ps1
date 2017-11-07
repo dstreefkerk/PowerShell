@@ -28,7 +28,7 @@ Places custom view files into %PROGRAMDATA%\Microsoft\Event Viewer\Views
 .EXAMPLE
 Create-EventViewerCustomViews.ps1
 .LINK
-TBA
+https://github.com/dstreefkerk/PowerShell/blob/master/Create-EventViewerCustomViews.ps1
 .NOTES
 Written By: Daniel Streefkerk
 Website:	http://daniel.streefkerkonline.com
