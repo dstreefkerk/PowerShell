@@ -1,0 +1,25 @@
+# Example BIOS Settings file for Lenovo ThinkCentre M710q (10MRA002AU)
+
+# Disable legacy boot features - CSM
+CSM,Disabled
+
+# Enable Secure Boot and Device Guard
+Secure Boot,Enabled
+Device Guard,Enabled
+
+# Disable any PXE boot functionality, we don't need it
+Boot Agent,Disabled
+PXE IPV4 Network Stack,Disabled
+PXE IPV6 Network Stack,Disabled
+
+# Disable AMT, etc
+Intel(R) Manageability Control,Disabled
+Press <Ctrl-P> to Enter MEBx,Disabled
+
+# Security
+Require Admin. Pass. For F12 Boot,Yes
+POP Changeable by User,No
+                                
+# Other stuff
+Boot Up Num-Lock Status,On
+Startup Device Menu Prompt,Enabled # example comment
