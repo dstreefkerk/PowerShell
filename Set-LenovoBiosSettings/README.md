@@ -4,7 +4,8 @@ A PowerShell script built to ease the deployment of Lenovo BIOS settings as part
 Some benefits of using this script:
 * Store BIOS settings for each model PC in a folder, and the script will automatically select the correct one
 * Pass in a BIOS password as a parameter to the script
-* Use multiple folders if you wish to apply certain settings at the beginning of a task sequence, and certain other settings at the end
+* Store different sets of settings in folders. Apply a set by specifying the folder name via the -SettingsFolder parameter
+* Settings are stored in simple .TXT files in name,value format. # comments are supported, so you can document your BIOS setting choices
 
 ## Examples
 
