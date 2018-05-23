@@ -8,6 +8,7 @@ Some benefits of using this script:
 * Settings are stored in simple .TXT files in name,value format. # comments are supported, so you can document your BIOS setting choices
 
 ## Examples
+*See LENOVO_10MRA002AU.txt in the Settings folder for an example of the settings file format*
 
 #### Apply BIOS settings for a PC from the Settings folder, without specifying a BIOS password
 *Note that a settings file matching this format must exist in the Settings folder - MANUFACTURER_MODEL.txt*
