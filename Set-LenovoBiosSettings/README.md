@@ -9,19 +9,19 @@ Some benefits of using this script:
 ## Examples
 
 #### Apply BIOS settings for a PC from the Settings folder, without specifying a BIOS password
-Note that a settings file matching this format must exist in the Settings folder - MANUFACTURER_MODEL.txt
+*Note that a settings file matching this format must exist in the Settings folder - MANUFACTURER_MODEL.txt*
 ```powershell
 Set-LenovoBiosSettings
 ```
 
 #### Apply BIOS settings for a PC from the "PreOSD" folder, without specifying a BIOS password
-Note that a settings file matching this format must exist in the PreOSD folder - MANUFACTURER_MODEL.txt
+*Note that a settings file matching this format must exist in the PreOSD folder - MANUFACTURER_MODEL.txt*
 ```powershell
 Set-LenovoBiosSettings -SettingsFolder PreOSD
 ```
 
 #### Apply BIOS settings for a PC from the "PostOSD" folder, specifying a BIOS password of 'correcthorsestaple'
-Note that a settings file matching this format must exist in the PostOSD folder - MANUFACTURER_MODEL.txt
+*Note that a settings file matching this format must exist in the PostOSD folder - MANUFACTURER_MODEL.txt*
 ```powershell
 Set-LenovoBiosSettings -SettingsFolder PreOSD -BiosPassword correcthorsestaple
 ```
