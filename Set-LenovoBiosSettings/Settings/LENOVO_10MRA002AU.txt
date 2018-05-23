@@ -1,4 +1,8 @@
 # Example BIOS Settings file for Lenovo ThinkCentre M710q (10MRA002AU)
+#
+# Settings must be on their own line, in format name,value
+# To view all available settings, see this script:
+# https://gist.github.com/dstreefkerk/05d88003eeb2b7f2d66b51c6f62ac23a
 
 # Disable legacy boot features - CSM
 CSM,Disabled
