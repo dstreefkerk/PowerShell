@@ -57,7 +57,7 @@ Apply BIOS settings for this model PC from the "PostOSD" folder, specifying a BI
 Set-LenovoBiosSettings -SettingsFolder PreOSD -BiosPassword correcthorsestaple
 
 .LINK
-TBA
+https://github.com/dstreefkerk/PowerShell/tree/master/Set-LenovoBiosSettings
 
 .NOTES
 Written By: Daniel Streefkerk
