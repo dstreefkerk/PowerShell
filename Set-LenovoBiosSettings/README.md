@@ -24,7 +24,7 @@ Set-LenovoBiosSettings -SettingsFolder PreOSD
 #### Apply BIOS settings for a PC from the "PostOSD" folder, specifying a BIOS password of 'correcthorsestaple'
 *Note that a settings file matching this format must exist in the PostOSD folder - MANUFACTURER_MODEL.txt*
 ```powershell
-Set-LenovoBiosSettings -SettingsFolder PreOSD -BiosPassword correcthorsestaple
+Set-LenovoBiosSettings -SettingsFolder PostOSD -BiosPassword correcthorsestaple
 ```
 ## Logging
 Output from the script is logged to a file 'LenovoBiosSettings.log' in the SMSTSLog folder. After OSD, this file is located in C:\Windows\CCM\Logs
