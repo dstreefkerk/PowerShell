@@ -25,6 +25,9 @@ Set-LenovoBiosSettings -SettingsFolder PreOSD
 ```powershell
 Set-LenovoBiosSettings -SettingsFolder PreOSD -BiosPassword correcthorsestaple
 ```
+## Logging
+Output from the script is logged to a file 'LenovoBiosSettings.log' in the SMSTSLog folder. After OSD, this file is located in C:\Windows\CCM\Logs
+
 ## Helper Script
 I've written a helper script that lists all of the current BIOS settings, as well as the possible values for each setting. It can be found here:
 https://gist.github.com/dstreefkerk/05d88003eeb2b7f2d66b51c6f62ac23a
