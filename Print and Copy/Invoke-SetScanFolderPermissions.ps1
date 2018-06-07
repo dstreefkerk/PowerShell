@@ -17,7 +17,7 @@ You could repurpose this script to automatically set up user-specific folders an
 Set the $scanRoot, $domainName, and $scanAccount variables to match your own environment
 
 .LINK
-TBA
+https://github.com/dstreefkerk/PowerShell/blob/master/Print%20and%20Copy/Invoke-SetScanFolderPermissions.ps1
 
 .NOTES
 Written By: Daniel Streefkerk
