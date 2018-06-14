@@ -107,7 +107,7 @@ $workingDirectory = Split-Path $PathToPS1File -Parent
 $taskAction = New-ScheduledTaskAction -Execute 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -Argument "-ExecutionPolicy $ExecutionPolicy -File ""$PathToPS1File""" -WorkingDirectory $workingDirectory
 
 # Set up the scheduled task trigger, to run as desired
-$taskTrigger = New-ScheduledTaskTrigger -Once -At $StartDateTime -RepetitionInterval $RepetitionInterval
+$taskTrigger = New-ScheduledTaskTrigger -Once -At $StartDateTime -RepetitionInterval $RepetitionInterval -RepetitionDuration ([System.TimeSpan]::MaxValue)
 
 # Set up a scheduled task principal to run the task
 $taskPrincipal = New-ScheduledTaskPrincipal -UserId $ManagedServiceAccount -RunLevel Highest -LogonType Password
