@@ -98,7 +98,7 @@ PARAM (
 )
 
 # Check if a task already exists with that name
-if (Get-ScheduledTask -TaskName $TaskName) { throw "A task with that name already exists."}
+if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue ) { throw "A task with that name already exists."}
 
 # Some scripts need the working directory set, so we'll figure out what that should be
 $workingDirectory = Split-Path $PathToPS1File -Parent
