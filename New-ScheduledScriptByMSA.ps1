@@ -2,7 +2,7 @@
 .DESCRIPTION
 	This script can be used to quickly set up a new scheduled PowerShell script to be run by a gMSA
 
-    Note that the gMSA needs to be installed on the system in question first.
+ 	Note that the gMSA needs to be installed on the system in question first.
 
 .SYNOPSIS
 	Set up a new Scheduled Task to run a PowerShell script as a gMSA (Group Managed Service Account)
@@ -11,22 +11,22 @@
 	Specify a name for the scheduled task
 
 .PARAMETER ManagedServiceAccount
-    Specify the Managed Service Account to use. Note that it should be in format "DOMAIN\gMSAName$" or "gMSAName$"
+	Specify the Managed Service Account to use. Note that it should be in format "DOMAIN\gMSAName$" or "gMSAName$"
 
 .PARAMETER PathToPS1File
-    The full path to the PowerShell script that is to be run on a schedule
+	The full path to the PowerShell script that is to be run on a schedule
 
 .PARAMETER StartDateTime
-    A DateTime object that denotes when the task will start running. Defaults to the time of task creation
+	A DateTime object that denotes when the task will start running. Defaults to the time of task creation
 
 .PARAMETER RepetitionInterval
-    A TimeSpan object that denotes how often the task will repeat. Defaults to 60 minutes
+	A TimeSpan object that denotes how often the task will repeat. Defaults to 60 minutes
 
 .PARAMETER TaskDescription
-    A description for the scheduled task. Will appear in the UI
+	A description for the scheduled task. Will appear in the UI
 
 .PARAMETER ExecutionPolicy
-    The PowerShell Execution Policy to run the scheduled script under. Defaults to "Bypass"
+	The PowerShell Execution Policy to run the scheduled script under. Defaults to "Bypass"
 	
 .EXAMPLE
 	.\New-ScheduledScriptByMSA.ps1 -TaskName "Test MSA Task" -ManagedServiceAccount 'DOMAIN\gMSA-Blah$' -PathToPS1File "C:\Scripts\RunThisScript.ps1" -TaskDescription "This is a test task"
@@ -56,18 +56,18 @@
 	Twitter: @dstreefkerk
 
 	REQUIREMENTS:
-      -gMSA must be already configured appropriately in AD
-      -gMSA must have "Log on as a Service" and "Log on as a Batch Job" rights on the machine in question
-      -gMSA must have permissions to read the PowerShell script, and to make changes as required by the script
-      -gMSA must be installed (by a local admin) on the system that's having the task installed
+		-gMSA must be already configured appropriately in AD
+		-gMSA must have "Log on as a Service" and "Log on as a Batch Job" rights on the machine in question
+		-gMSA must have permissions to read the PowerShell script, and to make changes as required by the script
+		-gMSA must be installed (by a local admin) on the system that's having the task installed
 
 	VERSION HISTORY:
-	1.0 	14/06/2018
-		Initial Version
+		1.0 	14/06/2018
+			Initial Version
 
 	TODO:
-            - Perhaps include a test to see if the gMSA is installed, however that will add a dependency on the ActiveDirectory module
-            - Error handling and logging
+		- Perhaps include a test to see if the gMSA is installed, however that will add a dependency on the ActiveDirectory module
+		- Error handling and logging
 #>
 
 PARAM (
