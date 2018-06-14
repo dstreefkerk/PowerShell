@@ -80,8 +80,8 @@ PARAM (
 	[string]$ManagedServiceAccount,
 	
 	[Parameter(Mandatory = $true, HelpMessage = "Specify the full path to the PowerShell Script")]
-    [ValidateScript({Test-Path $_})]	
-    [String]$PathToPS1File,
+	[ValidateScript({Test-Path $_})]	
+	[String]$PathToPS1File,
 
 	[Parameter(Mandatory = $false, HelpMessage = "Specify when the task should begin running. Default is now()")]
 	[datetime]$StartDateTime = (Get-Date),
@@ -93,8 +93,8 @@ PARAM (
 	[String]$TaskDescription,
 
 	[Parameter(Mandatory = $false, HelpMessage = "Run the scheduled script under this execution policy")]
-    [ValidateSet("AllSigned", "Bypass", "Default", "RemoteSigned", "Restricted", "Undefined", "Unrestricted")]	
-    [String]$ExecutionPolicy = "Bypass"
+	[ValidateSet("AllSigned", "Bypass", "Default", "RemoteSigned", "Restricted", "Undefined", "Unrestricted")]	
+	[String]$ExecutionPolicy = "Bypass"
 )
 
 # Check if a task already exists with that name
