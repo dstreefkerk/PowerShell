@@ -97,6 +97,9 @@ PARAM (
 	[String]$ExecutionPolicy = "Bypass"
 )
 
+# Determine the OS version this is running on
+$osVersion = [version]::Parse((Get-WmiObject Win32_OperatingSystem).Version)
+
 # Check if a task already exists with that name
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue ) { throw "A task with that name already exists."}
 
@@ -107,7 +110,13 @@ $workingDirectory = Split-Path $PathToPS1File -Parent
 $taskAction = New-ScheduledTaskAction -Execute 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -Argument "-ExecutionPolicy $ExecutionPolicy -File ""$PathToPS1File""" -WorkingDirectory $workingDirectory
 
 # Set up the scheduled task trigger, to run as desired
-$taskTrigger = New-ScheduledTaskTrigger -Once -At $StartDateTime -RepetitionInterval $RepetitionInterval -RepetitionDuration ([System.TimeSpan]::MaxValue)
+if ($osVersion.Major -lt 10) {
+    # Server 2012 R2 seems to need the -RepetitionDuration parameter
+    $taskTrigger = New-ScheduledTaskTrigger -Once -At $StartDateTime -RepetitionInterval $RepetitionInterval -RepetitionDuration ([System.TimeSpan]::MaxValue)
+} else {
+    # Server 2016 doesn't like the RepetitionDuration being set to [System.TimeSpan]::MaxValue
+    $taskTrigger = New-ScheduledTaskTrigger -Once -At $StartDateTime -RepetitionInterval $RepetitionInterval
+}
 
 # Set up a scheduled task principal to run the task
 $taskPrincipal = New-ScheduledTaskPrincipal -UserId $ManagedServiceAccount -RunLevel Highest -LogonType Password
