@@ -64,6 +64,9 @@
 	VERSION HISTORY:
 		1.0 	14/06/2018
 			Initial Version
+			
+		1.1	15/06/2018
+			Added some OS version handling to ensure it works on Server 2012 R2 and Server 2016
 
 	TODO:
 		- Perhaps include a test to see if the gMSA is installed, however that will add a dependency on the ActiveDirectory module
