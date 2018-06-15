@@ -2,7 +2,12 @@
 .DESCRIPTION
 	This script can be used to quickly set up a new scheduled PowerShell script to be run by a gMSA
 
- 	Note that the gMSA needs to be installed on the system in question first.
+ 	Note that the gMSA needs to be installed on the system in question first. 
+	
+	For example, setting up a gMSA to be used to run tasks on a server named "ITBOX", you'd do the following in AD:
+	New-ADServiceAccount -Name 'gMSA-ITBOX' -Description 'gMSA for tasks on itbox.contoso.local' -DNSHostName 'itbox.contoso.local' -PrincipalsAllowedToRetrieveManagedPassword 'itbox$'
+	
+	Note that the gMSA name is limited to a maximum of 15 characters
 
 .SYNOPSIS
 	Set up a new Scheduled Task to run a PowerShell script as a gMSA (Group Managed Service Account)
