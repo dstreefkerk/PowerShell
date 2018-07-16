@@ -18,7 +18,7 @@ Add-Type -AssemblyName System.Windows.Forms
 
 $iManageLinkTranslatorForm       = New-Object system.Windows.Forms.Form
 $iManageLinkTranslatorForm.ClientSize  = '624,265'
-$iManageLinkTranslatorForm.text  = "iManage Link Translater"
+$iManageLinkTranslatorForm.text  = "iManage Link Translator"
 $iManageLinkTranslatorForm.TopMost  = $false
 
 $existingLinkTextBox             = New-Object system.Windows.Forms.TextBox
