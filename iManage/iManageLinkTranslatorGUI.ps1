@@ -67,7 +67,7 @@ $rewrittenURLTextBox.location    = New-Object System.Drawing.Point(19,208)
 $rewrittenURLTextBox.Font        = 'Microsoft Sans Serif,10'
 
 $rewrittenURLLabel               = New-Object system.Windows.Forms.Label
-$rewrittenURLLabel.text          = "iManage Web Hostname:"
+$rewrittenURLLabel.text          = "iManage 10 URL:"
 $rewrittenURLLabel.AutoSize      = $true
 $rewrittenURLLabel.width         = 25
 $rewrittenURLLabel.height        = 10
