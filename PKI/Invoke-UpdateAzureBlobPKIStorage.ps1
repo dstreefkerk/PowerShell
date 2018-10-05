@@ -32,7 +32,7 @@ If your CA server uses Windows in a language other than English you'll need to a
 for the correct text strings in the AzCopy output.
 
 .LINK
-TBA
+https://github.com/dstreefkerk/PowerShell/blob/master/PKI/Invoke-UpdateAzureBlobPKIStorage.ps1
 
 .NOTES
 Written By: Daniel Streefkerk
