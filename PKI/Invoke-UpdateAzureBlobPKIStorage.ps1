@@ -116,7 +116,7 @@ if (Test-Path $azCopyLogLocation) {
     Remove-Item $azCopyLogLocation -Force
 
     # Throw an error code if transfers failed. This will bubble up to the scheduled task status
-    if ($transferFailed) {
+    if ($transferFailed -gt 0) {
         exit 9999
     }
 }
