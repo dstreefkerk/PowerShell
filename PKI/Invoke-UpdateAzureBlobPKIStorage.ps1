@@ -15,6 +15,7 @@ Requirements:
   4. A folder in the blob storage named 'pki' (https://<storageaccountname>.blob.core.windows.net/pki/)
   5. A SAS key with read/write/change access to blob storage only (don't assign more access than necessary)
   6. A scheduled task running hourly as NETWORK SERVICE to call this PowerShell script
+  7. Create a folder in %PROGRAMDATA% called ScriptLogs, and give NETWORK SERVICE [Modify] rights
 
 Ensure that you update the first two variables below with valid details pointing to your
 Azure blob storage.
