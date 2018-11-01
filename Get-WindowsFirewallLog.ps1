@@ -9,7 +9,7 @@ Not designed to do anything fancy.
 Just parses the Windows Firewall log and displays it in a PowerShell GridView
 
 .LINK
-TODO
+https://github.com/dstreefkerk/PowerShell/blob/master/Get-WindowsFirewallLog.ps1
 
 .NOTES
 Written By: Daniel Streefkerk
