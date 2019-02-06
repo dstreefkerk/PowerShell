@@ -194,7 +194,7 @@ begin {
     function Determine-O365DomainGuid ([string]$DomainName) {
         $isOffice365Tenant = Determine-ExchangeOnline -DomainName $DomainName
    
-        if ($isOffice365Tenant -eq $false) {
+        if ($isOffice365Tenant -eq 'No') {
             "N/A"
         } else {
             $nameExchange = Resolve-DnsName -Name $DomainName -Type MX -ErrorAction SilentlyContinue -WarningAction SilentlyContinue | Where-Object {$_.NameExchange -ne $null} | Select-Object -ExpandProperty NameExchange
@@ -211,7 +211,7 @@ begin {
     function Determine-O365Dkim ([string]$DomainName) {
         $isOffice365Tenant = Determine-ExchangeOnline -DomainName $DomainName
    
-        if ($isOffice365Tenant -eq $false) {
+        if ($isOffice365Tenant -eq 'No') {
             "N/A"
         } else {
             $selector1,$selector2 = 1..2 | ForEach-Object {Resolve-DnsName "selector$_._domainkey.$DomainName" -ErrorAction SilentlyContinue | Where-Object {$_.NameHost -ne $null} | Select-Object -ExpandProperty NameHost}
