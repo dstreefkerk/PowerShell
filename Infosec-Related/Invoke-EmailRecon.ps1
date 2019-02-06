@@ -132,17 +132,26 @@ begin {
         $resolved | Where-Object {$_.Strings -like '*v=DMARC1*'} | Select-Object -ExpandProperty Strings
     }
 
-    function Check-Office365 ([string]$DomainName) {
-        $isOffice365Tenant = $false
+    function Determine-ExchangeOnline ([string]$DomainName) {
+       $isOffice365Tenant = "No"
     
+        $msoidRecord = Resolve-DnsName "msoid.$($DomainName)" -ErrorAction SilentlyContinue -WarningAction SilentlyContinue | Where-Object {$_.NameHost -like '*clientconfig.microsoftonline*'}
+        if ($msoidRecord) {$isOffice365Tenant = 'Possibly'}
+
+        $txtVerificationRecord = Resolve-DnsName $DomainName -Type TXT -ErrorAction SilentlyContinue -WarningAction SilentlyContinue | Where-Object {$_.Strings -like 'MS=ms*'}
+        if ($txtVerificationRecord) {$isOffice365Tenant = 'Possibly'}
+
+        $mdmRecord = Resolve-DnsName -Name "enterpriseregistration.$DomainName" -Type CNAME -ErrorAction SilentlyContinue -WarningAction SilentlyContinue | Where-Object {$_.NameHost -eq 'enterpriseregistration.windows.net '}
+        if ($mdmRecord) {$isOffice365Tenant = 'Likely'}
+
+        $autoDiscoverRecord = Resolve-DnsName -Name "autodiscover.$DomainName" -Type CNAME -ErrorAction SilentlyContinue -WarningAction SilentlyContinue | Where-Object {$_.NameHost -eq 'autodiscover.outlook.com'}
+        if ($autoDiscoverRecord) {$isOffice365Tenant = 'Yes'}
+
         $mxRecords = Check-MxRecord $DomainName | Where-Object {$_.Name -like '*mail.protection.outlook.com*'}
-        if ($mxRecords) {$isOffice365Tenant = $true}
+        if ($mxRecords) {$isOffice365Tenant = 'Yes'}
 
         $spfRecords = Check-SpfRecord $DomainName | Where-Object {$_.Strings -like '*spf.protection.outlook.com*'}
-        if ($spfRecords) {$isOffice365Tenant = $true}
-
-        $msoidRecord = Resolve-DnsName "msoid.$($DomainName)" -ErrorAction SilentlyContinue -WarningAction SilentlyContinue | Where-Object {$_.NameHost -like '*clientconfig.microsoftonline*'}
-        if ($msoidRecord) {$isOffice365Tenant = $true}
+        if ($spfRecords) {$isOffice365Tenant = 'Yes'}
 
         $isOffice365Tenant
     }
@@ -183,7 +192,7 @@ begin {
     }
 
     function Determine-O365DomainGuid ([string]$DomainName) {
-        $isOffice365Tenant = Check-Office365 -DomainName $DomainName
+        $isOffice365Tenant = Determine-ExchangeOnline -DomainName $DomainName
    
         if ($isOffice365Tenant -eq $false) {
             "N/A"
@@ -200,7 +209,7 @@ begin {
     }
 
     function Determine-O365Dkim ([string]$DomainName) {
-        $isOffice365Tenant = Check-Office365 -DomainName $DomainName
+        $isOffice365Tenant = Determine-ExchangeOnline -DomainName $DomainName
    
         if ($isOffice365Tenant -eq $false) {
             "N/A"
@@ -229,7 +238,7 @@ process {
                                         'DMARC Record' = (Get-DmarcRecordText -DomainName $domain);
                                         'DNS Registrar' = (Check-DnsNameAdministrator -DomainName $domain);
                                         'DNS Host' = (Check-DnsHostingProvider -DomainName $domain);
-                                        'Office 365?'= (Check-Office365 -DomainName $domain);
+                                        'Exchange Online?'= (Determine-ExchangeOnline -DomainName $domain);
                                         'O365 Tenant Guid' = (Determine-O365DomainGuid -DomainName $domain);
                                         'O365 DKIM Enabled?' = (Determine-O365Dkim -DomainName $domain);
                                         })
