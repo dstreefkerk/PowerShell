@@ -98,15 +98,22 @@ begin {
     }
 
     function Get-SpfRecordText ([psobject]$DNSData) {
-        $DNSData.TXT | Where-Object {$_.Strings -like '*v=spf1*'} -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Strings -ErrorAction SilentlyContinue
+        $record = $DNSData.TXT | Where-Object {$_.Strings -like '*v=spf1*'} -ErrorAction SilentlyContinue
+
+        if ($record -eq $null) { return }
+
+        if (($record[0].Strings | Measure).Count -gt 1) {
+            $record[0].Strings -join ''
+        } else {
+            $record[0].Strings[0]
+        }
     }
 
     function Determine-SpfRecordMode ([psobject]$DNSData) {
-        $record = $DNSData.TXT | Where-Object {$_.Strings -like '*v=spf1*'} -ErrorAction SilentlyContinue
+        $record = Get-SpfRecordText -DNSData $DNSData
 
         if ($record) {
-            $recordData = $record | Select-Object -First 1 -ExpandProperty Strings
-            switch -Wildcard ($recordData) {
+            switch -Wildcard ($record) {
                 '*-all' { $determination = "FAIL" }
                 '*+all' { $determination = "PASS" }
                 '*~all' { $determination = "SOFTFAIL" }
