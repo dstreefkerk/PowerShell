@@ -94,7 +94,9 @@ begin {
     }
 
     function Check-SpfRecordExists ([psobject]$DNSData) {
-        $DNSData.TXT | Where-Object {$_.Strings -like '*v=spf1*'} -ErrorAction SilentlyContinue
+        $record = $DNSData.TXT | Where-Object {$_.Strings -like '*v=spf1*'} -ErrorAction SilentlyContinue
+
+        ($record -ne $null)
     }
 
     function Get-SpfRecordText ([psobject]$DNSData) {
@@ -129,11 +131,19 @@ begin {
     }
 
     function Check-DmarcRecordExists ([psobject]$DNSData) {
-        $DNSData.DMARC | Where-Object {$_.Strings -like '*v=DMARC1*'} -ErrorAction SilentlyContinue
+        $record = $DNSData.DMARC | Where-Object {$_.Strings -like '*v=DMARC1*'} -ErrorAction SilentlyContinue
+
+        ($record -ne $null)
     }
 
     function Get-DmarcRecordText ([psobject]$DNSData) {
-        $DNSData.DMARC | Where-Object {$_.Strings -like '*v=DMARC1*'} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Strings -ErrorAction SilentlyContinue
+        $record = $DNSData.DMARC | Where-Object {$_.Strings -like '*v=DMARC1*'} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Strings -ErrorAction SilentlyContinue
+
+        if ($record -ne $null) {
+            return $record
+        } else {
+                return "N/A"
+        }
     }
 
     function Determine-DmarcPolicy ([psobject]$dnsData) {
@@ -293,10 +303,10 @@ process {
         New-Object psobject -Property ([ordered]@{
                                         'Domain' = $domain;
                                         'MX Handler' = (Determine-MXHandler $dnsData);
-                                        'SPF Record Exists?' = ((Check-SpfRecordExists $dnsData) -ne $null);
+                                        'SPF Record Exists?' = (Check-SpfRecordExists $dnsData);
                                         'SPF Record' = (Get-SpfRecordText $dnsData);
                                         'SPF Mechanism (Mode)' = (Determine-SpfRecordMode $dnsData);
-                                        'DMARC Record Exists?'= ((Check-DmarcRecordExists $dnsData) -ne $null);
+                                        'DMARC Record Exists?'= (Check-DmarcRecordExists $dnsData);
                                         'DMARC Record' = (Get-DmarcRecordText $dnsData);
                                         'DMARC Domain Policy' = (Determine-DmarcPolicy $dnsData);
                                         'DMARC Subdomain Policy' = (Determine-DmarcSubdomainPolicy $dnsData);
