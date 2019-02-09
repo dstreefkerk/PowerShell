@@ -95,8 +95,12 @@ begin {
 
     function Check-SpfRecordExists ([psobject]$DNSData) {
         $record = $DNSData.TXT | Where-Object {$_.Strings -like '*v=spf1*'} -ErrorAction SilentlyContinue
-
-        ($record -ne $null)
+        
+        if (($record | Measure-Object).Count -gt 1) {
+            return "ERROR: MULTIPLE SPF RECORDS"
+        } else {
+            ($record -ne $null)
+        }
     }
 
     function Get-SpfRecordText ([psobject]$DNSData) {
