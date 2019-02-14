@@ -9,7 +9,8 @@
     is hosted on Exchange Online (sometimes ExOnline tenants pass their mail through filtering
     services like ProofPoint, Mimecast, etc)
 
-    If the domain is hosted on Exchange Online, it'll also check whether DKIM is configured
+    If the domain is hosted on Exchange Online, it'll also check whether DKIM is configured,
+    and determine whether the domain is federated or not.
 
 .SYNOPSIS
 	Perform email-based reconnaissance on a single domain, or a collection of domains 
