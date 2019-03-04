@@ -255,6 +255,7 @@ begin {
             '*mpmailmx*' { $determination = "Manage Protect (AU/NZ)" }
             '*nexon.com.au*' { $determination = "Nexon (AU MSP)" }
             '*trendmicro*' { $determination = "Trend Micro" }
+	    'seg.trustwave.com' { $determination = "Trustwave Secure Email Gateway Cloud" }
             '*pphosted*' { $determination = "Proofpoint" }
             '*ppe-hosted*' { $determination = "Proofpoint" }
             '*.emailsrvr.com' { $determination = "RackSpace" }
