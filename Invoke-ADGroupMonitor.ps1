@@ -29,6 +29,9 @@ $groups += Get-ADGroup -Filter {name -like "*admins*"} | Where-Object {$_.GroupC
 # Add Groups with *operators* in their name
 $groups += Get-ADGroup -Filter {name -like "*operators*"} | Where-Object {$_.GroupCategory -eq 'Security'}
 
+# Add Groups with Exchange* in their name
+$groups += Get-ADGroup -Filter {name -like "Exchange*"} | Where-Object {$_.GroupCategory -eq 'Security'}
+
 # Add the built-in Administrators group
 $groups += Get-ADGroup -Filter {SID -eq 'S-1-5-32-544'}
 
