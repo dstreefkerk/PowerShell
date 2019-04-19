@@ -76,6 +76,10 @@
             - Added 'MX (Lowest Preference)' property
             - Added more MX Provider name resolutions. eg. Barracuda ESS, FirstWave
             - Added checks for O365/Azure AD federation, and 4 new related properties
+
+        2.2 18/04/2019
+            - Now checking commonly-used federation hostnames and returning federation metadata URL if found
+            - Added more MX Provider name resolutions. eg. Sophos and some smaller Aussie mobs
 			
 	TODO:
 		- Add code comments and verbose logging
@@ -128,7 +132,7 @@ begin {
     # Check if the domain is configured in O365, and whether it's
     # Managed = O365/Azure AD is handling authentication
     # Federated = ADFS or a third-party cloud IDP is handling authentication
-    function Get-DomainFederationData ([string]$DomainName) {
+    function Get-DomainFederationDataFromO365 ([string]$DomainName) {
         try {
             $uri = "https://login.microsoftonline.com/common/userrealm/?user=testuser@$DomainName&api-version=2.1&checkForMicrosoftAccount=true"
 
@@ -241,13 +245,17 @@ begin {
 
         switch -Wildcard ($lowestPreferenceMX) {
             'aspmx*google.com' { $determination = "Google" }
-            'au*mimecast*' { $determination = "Mimecast AU" }
+            'au*mimecast*' { $determination = "Mimecast (AU)" }
             '*barracudanetworks.com' { $determination = "Barracuda ESS" }
             '*fireeyecloud.com' { $determination = "FireEye Email Security Cloud" }
-            'eu*mimecast*' { $determination = "Mimecast EU" }
-            '*firstwave.com.au*' { $determination = "FirstWave (AU)"}
+            '*eu-central*.sophos.com' { $determination = "Sophos (Germany)" }
+            'eu*mimecast*' { $determination = "Mimecast (EU)" }
+            '*eu-west*.sophos.com' { $determination = "Sophos (Ireland)" }
+            '*.firstcloudsecurity.net' { $determination = "FirstWave (AU)" }
+            '*firstwave.com.au' { $determination = "FirstWave (AU)"}
             '*in.mailcontrol.com' { $determination = "Forcepoint (Formerly Websense)" }
             '*iphmx*' { $determination = "Cisco Email Security (Formerly IronPort Cloud)" }
+			'*.itoncloud.com' { $determination = "ITonCloud (AU)" }
             '*mail.protection.outlook.com*' { $determination = "Microsoft Exchange Online" }
             '*messagelabs*' { $determination = "Symantec.Cloud" }
             '*mailguard*' { $determination = "Mailguard (AU)" }
@@ -255,11 +263,13 @@ begin {
             '*mpmailmx*' { $determination = "Manage Protect (AU/NZ)" }
             '*nexon.com.au*' { $determination = "Nexon (AU MSP)" }
             '*trendmicro*' { $determination = "Trend Micro" }
-	    'seg.trustwave.com' { $determination = "Trustwave Secure Email Gateway Cloud" }
+	        'seg.trustwave.com' { $determination = "Trustwave Secure Email Gateway Cloud" }
             '*pphosted*' { $determination = "Proofpoint" }
             '*ppe-hosted*' { $determination = "Proofpoint" }
             '*.emailsrvr.com' { $determination = "RackSpace" }
             '*securence*' { $determination = "Securence" }
+            '*us-west*.sophos.com' { $determination = "Sophos (US West)" }
+            '*us-east*.sophos.com' { $determination = "Sophos (US East)" }
             "*$($domainData.SOA.Name)" { $determination = "Self-Hosted"}
             "" { $determination = "NO MX RECORD FOUND"}
 
@@ -397,6 +407,38 @@ begin {
         ($mtaRecord -ne $null)
     }
 
+    # Try and determine the federation hostname, and check that it responds with federation metadata
+    function Determine-AdfsFederationMetadataUrl ([string]$DomainName) {
+        $federationPrefixes = 'adfs','sso','sts','fs','auth','idf','fed'
+        $fedHost = $null
+
+        foreach ($prefix in $federationPrefixes) {
+    
+            # Build up our attempted federation hostname
+            $tempURL = "{0}.{1}" -f $prefix,$DomainName
+
+            # Try and resolve the hostname
+            $resolved = Resolve-DnsName -Name $tempURL -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+    
+            # If the hostname doesn't resolve, skip to the next one
+            if ($resolved -eq $null) { continue }
+
+            # Assuming the federation service is ADFS, build up a path to the metadata file
+            $fedURL = "https://$tempURL/federationmetadata/2007-06/federationmetadata.xml" 
+    
+            # Try and retrieve the federation metadata XML file
+            $xmlData = $null
+            try {
+                $xmlData = Invoke-RestMethod -Method Get -Uri $fedURL -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+            }
+            catch {}
+
+            # If we managed to retrieve the XML metadata file, return the FQDN of the ADFS server
+            if (($xmlData -ne $null) -and ($xmlData.EntityDescriptor.entityID -ne $null)) {
+                return $tempURL
+            }
+        }
+    }
 }
 
 process {
@@ -420,7 +462,7 @@ process {
                 SELECTOR1 = Resolve-DnsName "selector1._domainkey.$domain" -Type CNAME
                 SELECTOR2 = Resolve-DnsName "selector2._domainkey.$domain" -Type CNAME
             }
-            FEDERATION = Get-DomainFederationData -DomainName $domain
+            FEDERATION = Get-DomainFederationDataFromO365 -DomainName $domain
         }
 
         $ErrorActionPreference = 'Continue'
@@ -447,6 +489,7 @@ process {
                                         'MTA-STS Record Exists?' = (Check-MtaStsRecordExists $dataCollection);
                                         'DNS Registrar' = (Check-DnsNameAdministrator $dataCollection);
                                         'DNS Host' = (Check-DnsHostingProvider $dataCollection);
+                                        'ADFS Host' = (Determine-AdfsFederationMetadataUrl $domain)
                                         })
     }
 }
