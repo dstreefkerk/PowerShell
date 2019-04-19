@@ -489,7 +489,7 @@ process {
                                         'MTA-STS Record Exists?' = (Check-MtaStsRecordExists $dataCollection);
                                         'DNS Registrar' = (Check-DnsNameAdministrator $dataCollection);
                                         'DNS Host' = (Check-DnsHostingProvider $dataCollection);
-                                        'ADFS Host' = (Determine-AdfsFederationMetadataUrl $domain)
+                                        #'ADFS Host' = (Determine-AdfsFederationMetadataUrl $domain)
                                         })
     }
 }
