@@ -80,6 +80,9 @@
         2.2 18/04/2019
             - Now checking commonly-used federation hostnames and returning federation metadata URL if found
             - Added more MX Provider name resolutions. eg. Sophos and some smaller Aussie mobs
+
+        2.3 08/05/2019
+            - Added detection for *.eo.outlook.com MX records (Exchange Online)
 			
 	TODO:
 		- Add code comments and verbose logging
@@ -231,7 +234,7 @@ begin {
         $spfRecord = $DomainData.TXT | Where-Object {$_.Strings -like '*spf.protection.outlook.com*'} -ErrorAction SilentlyContinue
         if ($spfRecord) {$isOffice365Tenant = 'Yes'}
 
-        $mxRecords = $DomainData.MX | Where-Object {$_.NameExchange -like '*mail.protection.outlook.com*'} -ErrorAction SilentlyContinue
+        $mxRecords = $DomainData.MX | Where-Object {($_.NameExchange -like '*mail.protection.outlook.com*') -or ($_.NameExchange -like '*eo.outlook.com')} -ErrorAction SilentlyContinue
         if ($mxRecords) {$isOffice365Tenant = 'Yes'}
 
         $isOffice365Tenant
@@ -248,6 +251,7 @@ begin {
             'au*mimecast*' { $determination = "Mimecast (AU)" }
             '*barracudanetworks.com' { $determination = "Barracuda ESS" }
             '*fireeyecloud.com' { $determination = "FireEye Email Security Cloud" }
+            '*.eo.outlook.com' { $determination = "Microsoft Exchange Online" }
             '*eu-central*.sophos.com' { $determination = "Sophos (Germany)" }
             'eu*mimecast*' { $determination = "Mimecast (EU)" }
             '*eu-west*.sophos.com' { $determination = "Sophos (Ireland)" }
