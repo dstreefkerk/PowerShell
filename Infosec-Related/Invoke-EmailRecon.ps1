@@ -268,6 +268,7 @@ begin {
             '*nexon.com.au*' { $determination = "Nexon (AU MSP)" }
             '*trendmicro*' { $determination = "Trend Micro" }
 	        'seg.trustwave.com' { $determination = "Trustwave Secure Email Gateway Cloud" }
+            '*.sendgrid.net' { $determination = "SendGrid" }
             '*pphosted*' { $determination = "Proofpoint" }
             '*ppe-hosted*' { $determination = "Proofpoint" }
             '*.emailsrvr.com' { $determination = "RackSpace" }
