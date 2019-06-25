@@ -83,6 +83,11 @@
 
         2.3 08/05/2019
             - Added detection for *.eo.outlook.com MX records (Exchange Online)
+
+        2.4 26/06/2019
+            - Refactored to indicate that what we were previously capturing as O365 Tenant GUID was actually the tenant name
+            - Added check to retrieve Azure AD Directory ID via OpenID Connect API
+            - Added Federation Brand Name field to output (we were already collecting it anyway)
 			
 	TODO:
 		- Add code comments and verbose logging
@@ -306,7 +311,7 @@ begin {
         }
     }
 
-    function Determine-O365DomainGuid ([psobject]$DomainData) {
+    function Determine-O365DomainTenantName ([psobject]$DomainData) {
         $isOffice365Tenant = Determine-ExchangeOnline $DomainData
    
         if ($isOffice365Tenant -eq 'No') { return "N/A" }
@@ -320,6 +325,26 @@ begin {
             $record = $nameExchange | Where-Object {$_ -like '*.mail.protection.outlook.com'} | Select -First 1
             if ($record) { $record.Replace('.mail.protection.outlook.com','') }
         } else { return "Undetermined" }
+    }
+
+    # Retrieve the Azure AD Directory ID from the Microsoft Identity Platform via OpenID Connect
+    # Credit to these blog posts
+        # https://blog.tyang.org/2018/01/07/getting-azure-ad-tenant-common-configuration-such-as-tenant-id-using-powershell/
+        # https://docs.microsoft.com/en-us/azure/active-directory/develop/v2-protocols-oidc
+    function Determine-O365DirectoryID ([string]$DomainName) {
+        try {
+            $uri = "https://login.windows.net/$DomainName/.well-known/openid-configuration"
+
+            $openIDResponse = Invoke-RestMethod -Uri $uri -ErrorAction Stop
+
+        }
+        catch {
+            Write-Verbose "Couldn't retrieve federation data for domain: $DomainName"
+        }
+
+        if ($openIDResponse.token_endpoint) {
+            $openIDResponse.token_endpoint.split('/')[3]  
+        }
     }
 
     # Determine if O365's DKIM setup is in place
@@ -450,7 +475,7 @@ process {
     foreach ($domain in $EmailDomain) {
         if ([string]::IsNullOrEmpty($domain)) { continue }
 
-        # Collect DNS Records
+        # Collect data
         $ErrorActionPreference = 'SilentlyContinue'
 
         $dataCollection = [psobject]@{
@@ -471,8 +496,9 @@ process {
         }
 
         $ErrorActionPreference = 'Continue'
-        # Finish collecting DNS records
-        
+        # Finish collecting data
+
+        # Analyse the collected data
         New-Object psobject -Property ([ordered]@{
                                         'Domain' = $domain;
                                         'MX Provider' = (Determine-MXHandler $dataCollection);
@@ -485,12 +511,14 @@ process {
                                         'DMARC Domain Policy' = (Determine-DmarcPolicy $dataCollection);
                                         'DMARC Subdomain Policy' = (Determine-DmarcSubdomainPolicy $dataCollection);
                                         'O365 Exchange Online?'= (Determine-ExchangeOnline $dataCollection);
-                                        'O365 Tenant GUID' = (Determine-O365DomainGuid $dataCollection);
+                                        'O365 Tenant Name' = (Determine-O365DomainTenantName $dataCollection);
                                         'O365 DKIM Enabled?' = (Determine-O365Dkim $dataCollection);
                                         'O365 Federated?' = (Determine-O365IsFederated $dataCollection);
                                         'O365 Federation Provider' = (Determine-O365FederationProvider $dataCollection);
                                         'O365 Federation Hostname' = (Get-O365FederationHostname $dataCollection);
+                                        'O365 Federation Brand Name' = $dataCollection.FEDERATION.FederationBrandName;
                                         'O365/AzureAD is Unmanaged?' = (Determine-AADIsUnmanaged $dataCollection);
+                                        'O365/AzureAD Directory ID' = (Determine-O365DirectoryID $domain);
                                         'MTA-STS Record Exists?' = (Check-MtaStsRecordExists $dataCollection);
                                         'DNS Registrar' = (Check-DnsNameAdministrator $dataCollection);
                                         'DNS Host' = (Check-DnsHostingProvider $dataCollection);
