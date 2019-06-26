@@ -508,8 +508,8 @@ process {
                                         'SPF Mechanism (Mode)' = (Determine-SpfRecordMode $dataCollection);
                                         'DMARC Record Exists?'= (Check-DmarcRecordExists $dataCollection);
                                         'DMARC Record' = (Get-DmarcRecordText $dataCollection);
-                                        'DMARC Domain Policy' = (Determine-DmarcPolicy $dataCollection);
-                                        'DMARC Subdomain Policy' = (Determine-DmarcSubdomainPolicy $dataCollection);
+                                        'DMARC Domain Policy (Mode)' = (Determine-DmarcPolicy $dataCollection);
+                                        'DMARC Subdomain Policy (Mode)' = (Determine-DmarcSubdomainPolicy $dataCollection);
                                         'O365 Exchange Online?'= (Determine-ExchangeOnline $dataCollection);
                                         'O365 Tenant Name' = (Determine-O365DomainTenantName $dataCollection);
                                         'O365 DKIM Enabled?' = (Determine-O365Dkim $dataCollection);
@@ -517,8 +517,8 @@ process {
                                         'O365 Federation Provider' = (Determine-O365FederationProvider $dataCollection);
                                         'O365 Federation Hostname' = (Get-O365FederationHostname $dataCollection);
                                         'O365 Federation Brand Name' = $dataCollection.FEDERATION.FederationBrandName;
-                                        'O365/AzureAD is Unmanaged?' = (Determine-AADIsUnmanaged $dataCollection);
                                         'O365/AzureAD Directory ID' = (Determine-O365DirectoryID $domain);
+                                        'O365/AzureAD is Unmanaged?' = (Determine-AADIsUnmanaged $dataCollection);
                                         'MTA-STS Record Exists?' = (Check-MtaStsRecordExists $dataCollection);
                                         'DNS Registrar' = (Check-DnsNameAdministrator $dataCollection);
                                         'DNS Host' = (Check-DnsHostingProvider $dataCollection);
