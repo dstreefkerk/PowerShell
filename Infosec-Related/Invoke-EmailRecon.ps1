@@ -3,7 +3,7 @@
 	A quick and dirty script to be used to automate the collection of 
     publicly-available email-related records
 
-    For example; MX, SPF, DMARC, HTA-STS records.
+    For example; MX, SPF, DMARC, MTA-STS records.
 
     It'll also try to make a determination about who's handling mail flow, and whether the domain
     is hosted on Exchange Online (sometimes ExOnline tenants pass their mail through filtering
@@ -88,6 +88,9 @@
             - Refactored to indicate that what we were previously capturing as O365 Tenant GUID was actually the tenant name
             - Added check to retrieve Azure AD Directory ID via OpenID Connect API
             - Added Federation Brand Name field to output (we were already collecting it anyway)
+
+        2.5 05/07/2019
+            - Implemented more comprehensive checking and reporting on MTA-STS
 			
 	TODO:
 		- Add code comments and verbose logging
@@ -149,6 +152,40 @@ begin {
         }
         catch {
             Write-Verbose "Couldn't retrieve federation data for domain: $DomainName"
+        }
+    }
+
+    # Check if the domain has an MTA-STS DNS record
+    # and matching policy
+    # If it does, capture the policy details into an object
+    function Get-MTASTSDetails ([string]$DomainName) {
+        $mtasts_dnsrecord = Resolve-DnsName -Name "_mta-sts.$DomainName" -Type TXT -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+        $mtasts_policy = $null
+
+        # If we don't detect an MTA-STS DNS record, return
+        if ($mtasts_dnsrecord -eq $null) { return }
+
+        # Try and retrieve the MTA-STS policy for the domain
+        try {
+            $uri = "https://mta-sts.$DomainName/.well-known/mta-sts.txt"
+
+            $mtasts_policy = Invoke-WebRequest -Uri $uri -ErrorAction Stop | Select-Object -ExpandProperty Content
+
+        }
+        catch {
+            Write-Verbose "Couldn't retrieve MTA-STS policy for domain: $DomainName"
+        }
+
+        # If we retrieved an MTA-STS policy, extract details from the plain-text file
+        # into an object
+        if ($mtasts_policy -ne $null) {
+
+            New-Object psobject -Property ([ordered]@{
+                                        'DNSRecord' = $mtasts_dnsrecord
+                                        'Version' = "$(($mtasts_policy | Select-String -Pattern "version:(.*)").Matches.Groups[1])" -replace ' ' # only STSv1 is valid, so this property isn't used elsewhere in the script yet
+                                        'Mode' = ($mtasts_policy | Select-String -Pattern "mode:.*(enforce|testing|none)").Matches[0].Captures[0].Groups[1].Value.ToUpper()
+                                        'AllowedMX' = (($mtasts_policy | Select-String -Pattern 'mx:(.*)' -AllMatches).Matches.Groups | ? {$_.Value -notlike "mx:*"} | select -ExpandProperty value) -replace " " -join ','
+                                        })
         }
     }
 
@@ -481,7 +518,7 @@ process {
         $dataCollection = [psobject]@{
             DMARC = Resolve-DnsName -Name "_dmarc.$($domain)" -Type TXT
             MX = Resolve-DnsName -Name $domain -Type MX
-            MTASTS = Resolve-DnsName -Name "_mta-sts.$domain" -Type TXT
+            MTASTS = Get-MTASTSDetails -DomainName $domain
             MSOID = Resolve-DnsName "msoid.$($domain)"
             TXT = Resolve-DnsName $domain -Type TXT
             ENTERPRISEREGISTRATION = Resolve-DnsName -Name "enterpriseregistration.$domain" -Type CNAME
@@ -519,7 +556,9 @@ process {
                                         'O365 Federation Brand Name' = $dataCollection.FEDERATION.FederationBrandName;
                                         'O365/AzureAD Directory ID' = (Determine-O365DirectoryID $domain);
                                         'O365/AzureAD is Unmanaged?' = (Determine-AADIsUnmanaged $dataCollection);
-                                        'MTA-STS Record Exists?' = (Check-MtaStsRecordExists $dataCollection);
+                                        'MTA-STS Record Exists?' = $dataCollection.MTASTS.DNSRecord -ne $null;
+                                        'MTA-STS Policy Mode' = $dataCollection.MTASTS.Mode;
+                                        'MTA-STS Allowed MX Hosts' = $dataCollection.MTASTS.AllowedMX;
                                         'DNS Registrar' = (Check-DnsNameAdministrator $dataCollection);
                                         'DNS Host' = (Check-DnsHostingProvider $dataCollection);
                                         #'ADFS Host' = (Determine-AdfsFederationMetadataUrl $domain)
