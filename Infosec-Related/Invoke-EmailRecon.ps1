@@ -89,11 +89,12 @@
             - Added check to retrieve Azure AD Directory ID via OpenID Connect API
             - Added Federation Brand Name field to output (we were already collecting it anyway)
 
-        2.5 05/07/2019
+        2.5 07/07/2019
             - Implemented more comprehensive checking and reporting on MTA-STS
+            - Implemented a basic check for DNSSEC existence
 			
 	TODO:
-		- Add code comments and verbose logging
+		- Port DNS resolution to Cloudflare DoH?
 #>
 
 
@@ -187,6 +188,23 @@ begin {
                                         'AllowedMX' = (($mtasts_policy | Select-String -Pattern 'mx:(.*)' -AllMatches).Matches.Groups | ? {$_.Value -notlike "mx:*"} | select -ExpandProperty value) -replace " " -join ','
                                         })
         }
+    }
+
+    # Retrieve basic DNSSEC details. More advanced checks to come.
+    function Get-DNSSECDetails ([string]$DomainName) {
+        $dnskey_dnsrecord = Resolve-DnsName -Name $DomainName -Type DNSKEY -ErrorAction SilentlyContinue -WarningAction SilentlyContinue | Where-Object {$_.Type -eq 'DNSKEY'}
+        $dnskey_exists = (($dnskey_dnsrecord | Measure-Object | Select-Object -ExpandProperty Count) -gt 0)
+
+        # If we don't detect an MTA-STS DNS record, return
+        if ($dnskey_dnsrecord -eq $null) { 
+            Write-Verbose "Couldn't locate a DNSKEY record for domain: $DomainName"
+            $dnskey_dnsrecord = "N/A"
+        }
+        
+        New-Object psobject -Property ([ordered]@{
+                                        'DNSKeyExists' = $dnskey_exists
+                                        'DNSKEYRecord' = $dnskey_dnsrecord
+                                        })
     }
 
     # Check which mode the SPF record advises remote email servers to use
@@ -526,10 +544,11 @@ process {
             SOA = Resolve-DnsName -Type SOA -Name $domain
             NS = Resolve-DnsName $domain -Type NS
             O365DKIM = [psobject]@{
-                SELECTOR1 = Resolve-DnsName "selector1._domainkey.$domain" -Type CNAME
-                SELECTOR2 = Resolve-DnsName "selector2._domainkey.$domain" -Type CNAME
-            }
+                    SELECTOR1 = Resolve-DnsName "selector1._domainkey.$domain" -Type CNAME
+                    SELECTOR2 = Resolve-DnsName "selector2._domainkey.$domain" -Type CNAME
+                }
             FEDERATION = Get-DomainFederationDataFromO365 -DomainName $domain
+            DNSSEC = Get-DNSSECDetails -DomainName $domain
         }
 
         $ErrorActionPreference = 'Continue'
@@ -561,6 +580,7 @@ process {
                                         'MTA-STS Allowed MX Hosts' = $dataCollection.MTASTS.AllowedMX;
                                         'DNS Registrar' = (Check-DnsNameAdministrator $dataCollection);
                                         'DNS Host' = (Check-DnsHostingProvider $dataCollection);
+                                        'DNSSEC DNSKEY Record Exists?' = $dataCollection.DNSSEC.DNSKeyExists;
                                         #'ADFS Host' = (Determine-AdfsFederationMetadataUrl $domain)
                                         })
     }
