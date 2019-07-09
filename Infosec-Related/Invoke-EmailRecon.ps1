@@ -92,9 +92,10 @@
         2.5 07/07/2019
             - Implemented more comprehensive checking and reporting on MTA-STS
             - Implemented a basic check for DNSSEC existence
+            - Added parameter to show if any MX records exist
 			
 	TODO:
-		- Port DNS resolution to Cloudflare DoH?
+		- TBA
 #>
 
 
@@ -557,6 +558,7 @@ process {
         # Analyse the collected data
         New-Object psobject -Property ([ordered]@{
                                         'Domain' = $domain;
+                                        'MX Records Exist?' = $dataCollection.mx.NameExchange.Count -gt 0;
                                         'MX Provider' = (Determine-MXHandler $dataCollection);
                                         'MX (Lowest Preference)' = (Get-LowestPreferenceMX $dataCollection);
                                         'SPF Record Exists?' = (Check-SpfRecordExists $dataCollection);
