@@ -308,6 +308,7 @@ begin {
         $lowestPreferenceMX = $DomainData.MX | Sort-Object -Property Preference | Select-Object -First 1 -ExpandProperty NameExchange -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
 
         switch -Wildcard ($lowestPreferenceMX) {
+            'inbound-smtp.*.amazonaws.com' { $determination = "Amazon SES" }
             'aspmx*google.com' { $determination = "Google" }
             'au*mimecast*' { $determination = "Mimecast (AU)" }
             '*barracudanetworks.com' { $determination = "Barracuda ESS" }
@@ -322,14 +323,19 @@ begin {
             '*iphmx*' { $determination = "Cisco Email Security (Formerly IronPort Cloud)" }
 			'*.itoncloud.com' { $determination = "ITonCloud (AU)" }
             '*mail.protection.outlook.com*' { $determination = "Microsoft Exchange Online" }
-            '*messagelabs*' { $determination = "Symantec.Cloud" }
             '*mailguard*' { $determination = "Mailguard (AU)" }
+            '*.mailgun.org' { $determination = "Mailgun" }
+            '*messagelabs*' { $determination = "Symantec.Cloud" }
+            '*.msng.telstra.com.au' { $determination = "Telstra (AU)" }
             '*mxthunder*' { $determination = "SpamHero" }
             '*mpmailmx*' { $determination = "Manage Protect (AU/NZ)" }
             '*nexon.com.au*' { $determination = "Nexon (AU MSP)" }
             '*trendmicro*' { $determination = "Trend Micro" }
+            '*.secureintellicentre.net.au' { $determination = "Macquarie Government (AU)" }
 	        'seg.trustwave.com' { $determination = "Trustwave Secure Email Gateway Cloud" }
             '*.sendgrid.net' { $determination = "SendGrid" }
+            '*.sge.net' { $determination = "Verizon Business (ex CyberTrust)" }
+            '*.spamh.com' { $determination = "Greenview Data SpamStopsHere" }
             '*pphosted*' { $determination = "Proofpoint" }
             '*ppe-hosted*' { $determination = "Proofpoint" }
             '*.emailsrvr.com' { $determination = "RackSpace" }
