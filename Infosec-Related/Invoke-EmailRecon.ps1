@@ -537,6 +537,15 @@ process {
     foreach ($domain in $EmailDomain) {
         if ([string]::IsNullOrEmpty($domain)) { continue }
 
+        # Attempt to find the SOA domain record, skip the domain if we can't locate one DNS
+        try {
+            Resolve-DnsName -Name $domain -Type SOA -ErrorAction Stop | Out-Null
+        }
+        catch {
+            Write-Verbose "Failed to locate SOA record for $domain"
+            continue
+        }
+
         # Collect data
         $ErrorActionPreference = 'SilentlyContinue'
 
