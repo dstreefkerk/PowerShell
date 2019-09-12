@@ -334,6 +334,7 @@ begin {
             '*.secureintellicentre.net.au' { $determination = "Macquarie Government (AU)" }
 	        'seg.trustwave.com' { $determination = "Trustwave Secure Email Gateway Cloud" }
             '*.sendgrid.net' { $determination = "SendGrid" }
+            '*.mtaroutes.com' { $determination = "Solarwinds Mail Assure" }
             '*.sge.net' { $determination = "Verizon Business (ex CyberTrust)" }
             '*.spamh.com' { $determination = "Greenview Data SpamStopsHere" }
             '*pphosted*' { $determination = "Proofpoint" }
