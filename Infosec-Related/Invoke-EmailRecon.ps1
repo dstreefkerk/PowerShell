@@ -322,9 +322,10 @@ begin {
             '*in.mailcontrol.com' { $determination = "Forcepoint (Formerly Websense)" }
             '*iphmx*' { $determination = "Cisco Email Security (Formerly IronPort Cloud)" }
 			'*.itoncloud.com' { $determination = "ITonCloud (AU)" }
-            '*mail.protection.outlook.com*' { $determination = "Microsoft Exchange Online" }
             '*mailguard*' { $determination = "Mailguard (AU)" }
             '*.mailgun.org' { $determination = "Mailgun" }
+            '*.server-mail.com' { $determination = "Melbourne IT" }
+            '*mail.protection.outlook.com*' { $determination = "Microsoft Exchange Online" }
             '*messagelabs*' { $determination = "Symantec.Cloud" }
             '*.msng.telstra.com.au' { $determination = "Telstra (AU)" }
             '*mxthunder*' { $determination = "SpamHero" }
