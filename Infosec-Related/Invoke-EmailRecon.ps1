@@ -64,36 +64,8 @@
 		- PowerShell 3.0, because we're using ordered PSObjects and the Resolve-DNSName cmdlet
 
 	VERSION HISTORY:
-		1.0 05/02/2019
-			- Initial Version, based on an old collection of stuff I've had lying around for ages
+		See https://github.com/dstreefkerk/PowerShell/commits/master/Infosec-Related/Invoke-EmailRecon.ps1
 
-        2.0 09/02/2019
-            - Refactored to cut down on the number of DNS queries the script has to make. 55% increase in speed.
-            - Added checks for MTA-STS record
-            - Added visibility around SPF and DKIM modes
-
-        2.1 14/02/2019
-            - Added 'MX (Lowest Preference)' property
-            - Added more MX Provider name resolutions. eg. Barracuda ESS, FirstWave
-            - Added checks for O365/Azure AD federation, and 4 new related properties
-
-        2.2 18/04/2019
-            - Now checking commonly-used federation hostnames and returning federation metadata URL if found
-            - Added more MX Provider name resolutions. eg. Sophos and some smaller Aussie mobs
-
-        2.3 08/05/2019
-            - Added detection for *.eo.outlook.com MX records (Exchange Online)
-
-        2.4 26/06/2019
-            - Refactored to indicate that what we were previously capturing as O365 Tenant GUID was actually the tenant name
-            - Added check to retrieve Azure AD Directory ID via OpenID Connect API
-            - Added Federation Brand Name field to output (we were already collecting it anyway)
-
-        2.5 07/07/2019
-            - Implemented more comprehensive checking and reporting on MTA-STS
-            - Implemented a basic check for DNSSEC existence
-            - Added parameter to show if any MX records exist
-			
 	TODO:
 		- TBA
 #>
