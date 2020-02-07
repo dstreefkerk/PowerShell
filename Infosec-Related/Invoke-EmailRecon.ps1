@@ -129,9 +129,33 @@ begin {
         }
     }
 
+    # Check if a wildcard SPF record exists (one should)
+    function Check-WildcardSpfRecordExists ([psobject]$DomainData) {
+        $record = $domainData.WILDCARDTXT | Where-Object {$_.Strings -like '*v=spf1*'} -ErrorAction SilentlyContinue
+        
+        if (($record | Measure-Object).Count -gt 1) {
+            return "MULTIPLE SPF RECORDS"
+        } else {
+            ($record -ne $null)
+        }
+    }
+
     # Get the actual SPF record data
     function Get-SpfRecordText ([psobject]$DomainData) {
         $record = $domainData.TXT | Where-Object {$_.Strings -like '*v=spf1*'} -ErrorAction SilentlyContinue
+
+        if ($record -eq $null) { return }
+
+        if (($record[0].Strings | Measure).Count -gt 1) {
+            $record[0].Strings -join ''
+        } else {
+            $record[0].Strings[0]
+        }
+    }
+
+    # Get the actual SPF record data out of the wildcard SPF record
+    function Get-WildcardSpfRecordText ([psobject]$DomainData) {
+        $record = $domainData.WILDCARDTXT | Where-Object {$_.Strings -like '*v=spf1*'} -ErrorAction SilentlyContinue
 
         if ($record -eq $null) { return }
 
@@ -557,6 +581,7 @@ process {
             MTASTS = Get-MTASTSDetails -DomainName $domain
             MSOID = Resolve-DnsName "msoid.$($domain)"
             TXT = Resolve-DnsName $domain -Type TXT
+            WILDCARDTXT = Resolve-DnsName "$([guid]::NewGuid().Guid.Replace('-','')).$domain" -Type TXT
             ENTERPRISEREGISTRATION = Resolve-DnsName -Name "enterpriseregistration.$domain" -Type CNAME
             AUTODISCOVER = Resolve-DnsName -Name "autodiscover.$domain" -Type CNAME
             SOA = Resolve-DnsName -Type SOA -Name $domain
@@ -581,6 +606,8 @@ process {
                                         'SPF Record Exists?' = (Check-SpfRecordExists $dataCollection);
                                         'SPF Record' = (Get-SpfRecordText $dataCollection);
                                         'SPF Mechanism (Mode)' = (Determine-SpfRecordMode $dataCollection);
+                                        'Wildcard SPF Record Exists?' = (Check-WildcardSpfRecordExists $dataCollection);
+                                        'Wildcard SPF Record' = (Get-WildcardSpfRecordText $dataCollection);
                                         'DMARC Record Exists?'= (Check-DmarcRecordExists $dataCollection);
                                         'DMARC Record' = (Get-DmarcRecordText $dataCollection);
                                         'DMARC Domain Policy (Mode)' = (Determine-DmarcPolicy $dataCollection);
