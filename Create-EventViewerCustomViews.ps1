@@ -1,4 +1,4 @@
-﻿#Requires -Version 5 -RunAsAdministrator
+#Requires -Version 5 -RunAsAdministrator
 <#
 .SYNOPSIS
 Create-EventViewerCustomViews - Creates local event viewer custom view files based on Palantir's WEF Github repo
@@ -61,28 +61,33 @@ $xmlTemplate = @"
 
 # Temporary storage location for the downloaded Palantir WEF
 $tempFile = (Join-Path $env:temp 'wef-repo.zip')
-Remove-Item $tempFile -Force
+Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
 
-# Download the Repo
+# Download the Repo, but it requires TLS 1.2
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 Invoke-WebRequest -Uri $repoZipURL -OutFile $tempFile
 
-if (!Test-Path $tempFile) {
+# https://stackoverflow.com/questions/8095638/how-do-i-negate-a-condition-in-powershell
+if (-Not (Test-Path $tempFile)) {
     throw "Couldn't locate the downloaded Repo ZIP file. You could manually download it at $repoZipURL and save it as $tempFile"
 }
 
 # Expand the ZIP file to a temporary folder
 $tempFolder = (Join-Path $env:temp 'wef-repo')
-Expand-Archive $tempFile -DestinationPath $tempFolder
+Expand-Archive $tempFile -DestinationPath $tempFolder -Force
 
 # Get our list of WEF Subscription files
-$subscriptionFiles = Get-ChildItem (Join-Path $tempFolder 'windows-event-forwarding-master\wef-subscriptions') -File
+$subscriptionFiles = Get-ChildItem (Join-Path $tempFolder 'windows-event-forwarding-master\wef-subscriptions\*.xml') -File
 
 foreach ($file in $subscriptionFiles) {
     # Grab a copy of our custom Event Log view template XML
     $eventXml = $xmlTemplate
 
     # Convert the repo subscription file to XML
-    $fileXml = [xml](Get-Content $file)
+    $fileXml = [xml](Get-Content $file.FullName)
+
+    # For test
+    "Processing: " + $file.Name
 
     # Insert the info from the repo subscription file into our template
     $eventXml = $eventXml.Replace('{NAMEHERE}',$filexml.Subscription.SubscriptionId)
