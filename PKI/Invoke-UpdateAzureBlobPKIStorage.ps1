@@ -9,7 +9,7 @@ internal web servers and/or opening them up to the Internet through
 a DMZ or via a reverse proxy like Azure AD App Proxy.
 
 Requirements:
-  1. AzCopy installed on the CA server - http://aka.ms/azcopy
+  1. AzCopy 10+ installed on the CA server - http://aka.ms/azcopy
   2. Outbound HTTPS from the CA server to Azure Blob Storage
   3. An Azure Storage Account with blob storage configured for HTTP access
   4. A folder in the blob storage named 'pki' (https://<storageaccountname>.blob.core.windows.net/pki/)
@@ -43,6 +43,7 @@ Todo:       Nothing at the moment
 
 Change Log
 v1.0, 05/10/2018 - Initial version
+05/19/2022 - AzCopy 10 compatibility fix
 #>
 
 # Blob storage location to upload files to
