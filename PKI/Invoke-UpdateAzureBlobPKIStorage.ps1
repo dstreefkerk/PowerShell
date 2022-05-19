@@ -46,7 +46,7 @@ v1.0, 05/10/2018 - Initial version
 #>
 
 # Blob storage location to upload files to
-$azCopyDestination = "https://<storageaccountname>.blob.core.windows.net/pki/"
+$azCopyDestination = "https://<storageaccountname>.blob.core.windows.net/pki/?"
 
 # SAS key for the above destination
 $azCopyDestinationSASKey = "<YOUR SAS KEY HERE>"
@@ -87,7 +87,7 @@ $ErrorActionPreference = 'Stop'
 
 try {
     # Run AzCopy to copy only .crl files that are newer than already exist at the destination
-    &$azCopyBinaryPath /Source:$cdpLocalLocation /Dest:$azCopyDestination /DestSAS:$azCopyDestinationSASKey /Pattern:"*.crl" /Y /XO /V:$azCopyLogLocation
+    &$azCopyBinaryPath cp $cdpLocalLocation $azCopyDestination$azCopyDestinationSASKey --include-pattern="*.crl" --log-level="error" --check-length=false
     }
 catch {
     $error | Out-File $azCopyLogArchiveLocation -Append
