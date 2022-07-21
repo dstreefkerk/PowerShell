@@ -49,6 +49,6 @@ foreach ($selector in $dkimSelectors) {
 }
 
 [PSCustomObject]@{
-    "DKIMSelectors-TXT" = $matchedTXTSelectors -join ',';
+    "DKIMSelectors-TXT" = $matchedTXTSelectors -join ','
     "DKIMSelectors-CNAME" = $matchedCNAMESelectors -join ','
 }
