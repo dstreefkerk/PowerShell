@@ -309,6 +309,7 @@ begin {
             'au*mimecast*' { $determination = "Mimecast (AU)" }
             '*barracudanetworks.com' { $determination = "Barracuda ESS" }
             '*fireeyecloud.com' { $determination = "FireEye Email Security Cloud" }
+            'de*mimecast*' { $determination = "Mimecast (DE)" }
             '*.eo.outlook.com' { $determination = "Microsoft Exchange Online" }
             '*eu-central*.sophos.com' { $determination = "Sophos (Germany)" }
             'eu*mimecast*' { $determination = "Mimecast (EU)" }
@@ -338,6 +339,7 @@ begin {
             '*ppe-hosted*' { $determination = "Proofpoint" }
             '*.emailsrvr.com' { $determination = "RackSpace" }
             '*securence*' { $determination = "Securence" }
+            'us*mimecast*' { $determination = "Mimecast (US)" }
             '*us-west*.sophos.com' { $determination = "Sophos (US West)" }
             '*us-east*.sophos.com' { $determination = "Sophos (US East)" }
             "*$($domainData.SOA.Name)" { $determination = "Self-Hosted"}
