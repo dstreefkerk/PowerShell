@@ -319,6 +319,7 @@ begin {
             '*in.mailcontrol.com' { $determination = "Forcepoint (Formerly Websense)" }
             '*iphmx*' { $determination = "Cisco Email Security (Formerly IronPort Cloud)" }
 			'*.itoncloud.com' { $determination = "ITonCloud (AU)" }
+            'mx*.mailcluster.com.au' { $determination = "Digital Pacific (AU)" } # https://support.digitalpacific.com.au/en/knowledgebase/article/what-are-digital-pacifics-mx-records
             '*mailguard*' { $determination = "Mailguard (AU)" }
             '*.mailgun.org' { $determination = "Mailgun" }
             '*.server-mail.com' { $determination = "Melbourne IT" }
