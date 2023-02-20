@@ -320,6 +320,9 @@ begin {
             '*iphmx*' { $determination = "Cisco Email Security (Formerly IronPort Cloud)" }
 			'*.itoncloud.com' { $determination = "ITonCloud (AU)" }
             'mx*.mailcluster.com.au' { $determination = "Digital Pacific (AU)" } # https://support.digitalpacific.com.au/en/knowledgebase/article/what-are-digital-pacifics-mx-records
+            'mx.us.mailmarshal.cloud' { $determination = "Trustwave MailMarshal Cloud (US)" } # https://support.trustwave.com/MailMarshalCloud/kb/item.asp?id=21095&Keywords=#mx
+            'mx.au.mailmarshal.cloud' { $determination = "Trustwave MailMarshal Cloud (AU)" } # https://support.trustwave.com/SEGCloud/kb/item.asp?id=21149#mx
+            'mx.eu.mailmarshal.cloud' { $determination = "Trustwave MailMarshal Cloud (EU)" } # https://support.trustwave.com/SEGCloud/kb/item.asp?id=21148#mx
             '*mailguard*' { $determination = "Mailguard (AU)" }
             '*.mailgun.org' { $determination = "Mailgun" }
             '*.server-mail.com' { $determination = "Melbourne IT" }
