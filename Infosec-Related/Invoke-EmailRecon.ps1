@@ -9,7 +9,28 @@
     is hosted on Exchange Online (sometimes ExOnline tenants pass their mail through filtering
     services like ProofPoint, Mimecast, etc)
 
-    If the domain is hosted on Exchange Online, it'll also check whether DKIM is configured,
+
+DNS Lookup
+Use this DNS lookup tool to easily view the standard DNS records for a domain.
+Whatsapp.com
+
+A : 157.240.241.60
+AAAA : 2a03:2880:f212:1d1:face:b00c:0:167
+MX : 10 mxb-00082601.gslb.pphosted.com.
+MX : 10 mxa-00082601.gslb.pphosted.com.
+NS : a.ns.whatsapp.net.
+NS : c.ns.whatsapp.net.
+NS : b.ns.whatsapp.net.
+NS : d.ns.whatsapp.net.
+TXT : "google-site-verification=MXbDGih8wW-64G5maXGw8iIkFbH7iv_vLobZd-kxdNo"
+TXT : "dropbox-domain-verification=lfq0o9x85s8s"
+TXT : "MS=ms22994725"
+TXT : "Ghm7XCdpYQEendZNsepA80OBAhbN9sfITvUxiy9FNdOGBxeAQICCmLbuXm23hNaysns+wZ6GskJWMtWD1/Ha9Q=="
+TXT : "v=spf1 include:_spf.fb.com include:_spf.google.com include:facebookmail.com -all"
+TXT : "bFwlY7J2JzFYHw5qkQFcBD6EOr9JL4VBpYSXSk3p8lA"
+TXT : "adobe-idp-site-verification=a0d9793b-fc40-430b-9ab4-d3c75e4dcfba"
+TXT : "b42e0aa4-9d21-4a73-a111-fba236f1a835"
+SOA : a.ns.whatsapp.net. dns.whatsapp.net. 101788178 14400 1800 604800 300    If the domain is hosted on Exchange Online, it'll also check whether DKIM is configured,
     and determine whether the domain is federated or not.
 
 .SYNOPSIS
