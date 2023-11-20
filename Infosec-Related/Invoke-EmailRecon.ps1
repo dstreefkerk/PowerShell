@@ -179,7 +179,7 @@ begin {
         if ($mtasts_policy -ne $null) {
 
             New-Object psobject -Property ([ordered]@{
-                                        'DNSRecord' = $mtasts_dnsrecord
+                                        'DNSRecord' = $mtasts_dnsrecord | Select-Object -ExpandProperty Strings
                                         'Version' = "$(($mtasts_policy | Select-String -Pattern "version:(.*)").Matches.Groups[1])" -replace ' ' # only STSv1 is valid, so this property isn't used elsewhere in the script yet
                                         'Mode' = ($mtasts_policy | Select-String -Pattern "mode:.*(enforce|testing|none)").Matches[0].Captures[0].Groups[1].Value.ToUpper()
                                         'AllowedMX' = (($mtasts_policy | Select-String -Pattern 'mx:(.*)' -AllMatches).Matches.Groups | ? {$_.Value -notlike "mx:*"} | select -ExpandProperty value) -replace " " -join ','
