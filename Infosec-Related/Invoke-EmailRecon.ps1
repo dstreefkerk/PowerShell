@@ -599,7 +599,7 @@ process {
                                         'O365 Federation Brand Name' = $dataCollection.FEDERATION.FederationBrandName;
                                         'O365/AzureAD Directory ID' = (Determine-O365DirectoryID $domain);
                                         'O365/AzureAD is Unmanaged?' = (Determine-AADIsUnmanaged $dataCollection);
-                                        'MTA-STS Record Exists?' = $dataCollection.MTASTS.DNSRecord -ne $null;
+                                        'MTA-STS Record Exists?' = $dataCollection.MTASTS.DNSRecord -like "v=STSv1*";
                                         'MTA-STS Policy Mode' = $dataCollection.MTASTS.Mode;
                                         'MTA-STS Allowed MX Hosts' = $dataCollection.MTASTS.AllowedMX;
                                         'DNS Registrar' = (Check-DnsNameAdministrator $dataCollection);
