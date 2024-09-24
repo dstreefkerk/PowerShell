@@ -295,18 +295,112 @@ begin {
         $isOffice365Tenant
     }
 
-    # Figure out the Microsoft Online Email Routing Address (MOERA) domain (e.g. contoso.onmicrosoft.com)
+    # Try and figure out the Microsoft Online Email Routing Address (MOERA) domain (e.g. contoso.onmicrosoft.com)
     function Determine-M365MOERAName ([psobject]$DomainData) {
 
-        $MOERA = $DomainData.M365DOMAINS | Where-Object {$_ -like "*.mail.onmicrosoft.com"}
-
-        if (($MOERA | Measure-Object).Count -gt 1) {
-            $MOERA -join ','
-        } else {
-            $MOERA
+        # Get all *.onmicrosoft.com domains, excluding *.mail.onmicrosoft.com
+        $onMicrosoftDomains = $DomainData.M365DOMAINS | Where-Object {
+            ($_ -like "*.onmicrosoft.com") -and ($_ -notlike "*.mail.onmicrosoft.com")
         }
 
+        # Initialize a list to store domains with their associated data
+        $domainInfoList = @()
+
+        foreach ($domain in $onMicrosoftDomains) {
+            # Initialise a hashtable to store domain information
+            $domainInfo = @{
+                Domain = $domain
+                HasMX = $false
+                HasSPF = $false
+                HasDMARC = $false
+            }
+
+            # Check for MX records
+            $mxRecords = Resolve-DnsName -Name $domain -Type MX -ErrorAction SilentlyContinue
+            if ($mxRecords) {
+                $domainInfo.HasMX = $true
+            }
+
+            # Check for SPF records
+            $txtRecords = Resolve-DnsName -Name $domain -Type TXT -ErrorAction SilentlyContinue
+            if ($txtRecords) {
+                foreach ($record in $txtRecords) {
+                    if ($record.Strings -match "v=spf1") {
+                        $domainInfo.HasSPF = $true
+                        break
+                    }
+                }
+            }
+
+            # Check for DMARC records
+            $dmarcRecords = Resolve-DnsName -Name "_dmarc.$domain" -Type TXT -ErrorAction SilentlyContinue
+            if ($dmarcRecords) {
+                foreach ($record in $dmarcRecords) {
+                    if ($record.Strings -match "v=DMARC1") {
+                        $domainInfo.HasDMARC = $true
+                        break
+                    }
+                }
+            }
+
+            # Add the domain information to the list
+            $domainInfoList += New-Object PSObject -Property $domainInfo
+        }
+
+        # Determine the MOERA domain based on the collected data
+        # Prioritise domains with MX records, then SPF, then DMARC
+
+        # Filter domains with MX records
+        $domainsWithMX = $domainInfoList | Where-Object { $_.HasMX -eq $true }
+        if ($domainsWithMX.Count -eq 1) {
+            return $domainsWithMX[0].Domain
+        } elseif ($domainsWithMX.Count -gt 1) {
+            # If multiple domains have MX records, further filter based on SPF
+            $domainsWithSPF = $domainsWithMX | Where-Object { $_.HasSPF -eq $true }
+            if ($domainsWithSPF.Count -eq 1) {
+                return $domainsWithSPF[0].Domain
+            } elseif ($domainsWithSPF.Count -gt 1) {
+                # If still multiple, check for DMARC
+                $domainsWithDMARC = $domainsWithSPF | Where-Object { $_.HasDMARC -eq $true }
+                if ($domainsWithDMARC.Count -ge 1) {
+                    # Return all domains that match all criteria
+                    return ($domainsWithDMARC | Select-Object -ExpandProperty Domain) -join ','
+                } else {
+                    # Return domains with MX and SPF
+                    return ($domainsWithSPF | Select-Object -ExpandProperty Domain) -join ','
+                }
+            } else {
+                # Return domains with MX only
+                return ($domainsWithMX | Select-Object -ExpandProperty Domain) -join ','
+            }
+        } else {
+            # If no domains have MX records, prioritise SPF records
+            $domainsWithSPF = $domainInfoList | Where-Object { $_.HasSPF -eq $true }
+            if ($domainsWithSPF.Count -eq 1) {
+                return $domainsWithSPF[0].Domain
+            } elseif ($domainsWithSPF.Count -gt 1) {
+                # If multiple domains have SPF, check for DMARC
+                $domainsWithDMARC = $domainsWithSPF | Where-Object { $_.HasDMARC -eq $true }
+                if ($domainsWithDMARC.Count -ge 1) {
+                    # Return domains with SPF and DMARC
+                    return ($domainsWithDMARC | Select-Object -ExpandProperty Domain) -join ','
+                } else {
+                    # Return domains with SPF only
+                    return ($domainsWithSPF | Select-Object -ExpandProperty Domain) -join ','
+                }
+            } else {
+                # If no domains have MX or SPF, check for DMARC
+                $domainsWithDMARC = $domainInfoList | Where-Object { $_.HasDMARC -eq $true }
+                if ($domainsWithDMARC.Count -ge 1) {
+                    return ($domainsWithDMARC | Select-Object -ExpandProperty Domain) -join ','
+                } else {
+                    # As a last resort, return all *.onmicrosoft.com domains
+                    return $onMicrosoftDomains -join ','
+                }
+            }
+        }
     }
+
 
     # Determine if DMARC is enabled for the MOERA domain
     function Determine-M365MOERADMARC ([psobject]$DomainData) {
