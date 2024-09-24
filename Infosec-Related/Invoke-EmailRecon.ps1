@@ -57,8 +57,6 @@
 .NOTES
 	NAME:	 Invoke-EmailRecon.ps1
 	AUTHOR:	 Daniel Streefkerk
-	WWW:	 https://daniel.streefkerkonline.com
-	Twitter: @dstreefkerk
 
 	REQUIREMENTS:
 		- PowerShell 3.0, because we're using ordered PSObjects and the Resolve-DNSName cmdlet
@@ -297,6 +295,36 @@ begin {
         $isOffice365Tenant
     }
 
+    # Figure out the Microsoft Online Email Routing Address (MOERA) domain (e.g. contoso.onmicrosoft.com)
+    function Determine-M365MOERAName ([psobject]$DomainData) {
+
+        $MOERA = $DomainData.M365DOMAINS | Where-Object {$_ -like "*.mail.onmicrosoft.com"}
+
+        if (($MOERA | Measure-Object).Count -gt 1) {
+            $MOERA -join ','
+        } else {
+            $MOERA
+        }
+
+    }
+
+    # Determine if DMARC is enabled for the MOERA domain
+    function Determine-M365MOERADMARC ([psobject]$DomainData) {
+        $MOERA = $DomainData.M365DOMAINS | Where-Object {$_ -like "*.mail.onmicrosoft.com"}
+
+        $MOERADomain = $MOERA | Select-Object -First 1
+
+        if ($null -eq $MOERADomain) { return }
+
+        $MOERATXTRecords = Resolve-DnsName -Name $MOERADomain -Type TXT
+
+        if ($null -eq $MOERATXTRecords) {
+            return ""
+        }
+
+        $MOERATXTRecords | Where-Object {$_.Strings -like '*v=DMARC1*'} -ErrorAction SilentlyContinue
+    }
+
     # Determine who's handling inbound emails, based on the hostname in the lowest preference MX record
     function Determine-MXHandler ([psobject]$DomainData) {
         if ($DomainData.MX -eq $null) { return }
@@ -391,6 +419,61 @@ begin {
             $record = $nameExchange | Where-Object {$_ -like '*.mail.protection.outlook.com'} | Select -First 1
             if ($record) { $record.Replace('.mail.protection.outlook.com','') }
         } else { return "Undetermined" }
+    }
+
+    # Inspired by AADInternals
+    function Get-M365Domains ([string]$DomainName){
+        Process {
+            # Autodiscover URL for Commercial/GCC environments
+            $uri = "https://autodiscover-s.outlook.com/autodiscover/autodiscover.svc"
+
+            # Simplified SOAP request body
+            $body = @"
+<soap:Envelope xmlns:soap='http://schemas.xmlsoap.org/soap/envelope/' 
+                xmlns:a='http://www.w3.org/2005/08/addressing' 
+                xmlns:autodiscover='http://schemas.microsoft.com/exchange/2010/Autodiscover'>
+    <soap:Header>
+    <a:Action soap:mustUnderstand='1'>http://schemas.microsoft.com/exchange/2010/Autodiscover/Autodiscover/GetFederationInformation</a:Action>
+    <a:To soap:mustUnderstand='1'>$uri</a:To>
+    <a:ReplyTo>
+        <a:Address>http://www.w3.org/2005/08/addressing/anonymous</a:Address>
+    </a:ReplyTo>
+    </soap:Header>
+    <soap:Body>
+    <autodiscover:GetFederationInformationRequestMessage>
+        <autodiscover:Request>
+        <autodiscover:Domain>$DomainName</autodiscover:Domain>
+        </autodiscover:Request>
+    </autodiscover:GetFederationInformationRequestMessage>
+    </soap:Body>
+</soap:Envelope>
+"@
+
+            # Headers for the SOAP request
+            $headers = @{
+                "Content-Type" = "text/xml; charset=utf-8"
+                "SOAPAction"   = '"http://schemas.microsoft.com/exchange/2010/Autodiscover/Autodiscover/GetFederationInformation"'
+            }
+
+            # Send the request
+            try {
+                $response = Invoke-RestMethod -Method Post -Uri $uri -Body $body -Headers $headers -UseBasicParsing
+
+                # Extract domain information
+                $domains = $response.Envelope.Body.GetFederationInformationResponseMessage.Response.Domains.Domain
+            
+                # Ensure the original domain is included
+                if ($Domain -notin $domains) {
+                    $domains += $Domain
+                }
+
+                # Return sorted, comma-separated list of domains
+                $domains | Sort-Object
+            }
+            catch {
+                Write-Error "Failed to retrieve tenant domains: $_"
+            }
+        }
     }
 
     # Retrieve the Azure AD Directory ID from the Microsoft Identity Platform via OpenID Connect
@@ -570,6 +653,7 @@ process {
                 }
             FEDERATION = Get-DomainFederationDataFromO365 -DomainName $domain
             DNSSEC = Get-DNSSECDetails -DomainName $domain
+            M365DOMAINS = Get-M365Domains -DomainName $domain
         }
 
         $ErrorActionPreference = 'Continue'
@@ -590,22 +674,24 @@ process {
                                         'DMARC Record' = (Get-DmarcRecordText $dataCollection);
                                         'DMARC Domain Policy (Mode)' = (Determine-DmarcPolicy $dataCollection);
                                         'DMARC Subdomain Policy (Mode)' = (Determine-DmarcSubdomainPolicy $dataCollection);
-                                        'O365 Exchange Online?'= (Determine-ExchangeOnline $dataCollection);
-                                        'O365 Tenant Name' = (Determine-O365DomainTenantName $dataCollection);
-                                        'O365 DKIM Enabled?' = (Determine-O365Dkim $dataCollection);
-                                        'O365 Federated?' = (Determine-O365IsFederated $dataCollection);
-                                        'O365 Federation Provider' = (Determine-O365FederationProvider $dataCollection);
-                                        'O365 Federation Hostname' = (Get-O365FederationHostname $dataCollection);
-                                        'O365 Federation Brand Name' = $dataCollection.FEDERATION.FederationBrandName;
-                                        'O365/AzureAD Directory ID' = (Determine-O365DirectoryID $domain);
-                                        'O365/AzureAD is Unmanaged?' = (Determine-AADIsUnmanaged $dataCollection);
+                                        'M365 Exchange Online?'= (Determine-ExchangeOnline $dataCollection);
+                                        'M365 Tenant Name' = (Determine-O365DomainTenantName $dataCollection);
+                                        'M365 MOERA Domain' = (Determine-M365MOERAName $dataCollection);
+                                        'M365 MOERA Domain DMARC Record' = (Determine-M365MOERADMARC $dataCollection);
+                                        'M365 Domains' = (Determine-M365Domains -DomainName $domain);
+                                        'M365 DKIM Enabled?' = (Determine-O365Dkim $dataCollection);
+                                        'M365 Federated?' = (Determine-O365IsFederated $dataCollection);
+                                        'M365 Federation Provider' = (Determine-O365FederationProvider $dataCollection);
+                                        'M365 Federation Hostname' = (Get-O365FederationHostname $dataCollection);
+                                        'M365 Federation Brand Name' = $dataCollection.FEDERATION.FederationBrandName;
+                                        'M365/EntraID Directory ID' = (Determine-O365DirectoryID $domain);
+                                        'M365/EntraID is Unmanaged?' = (Determine-AADIsUnmanaged $dataCollection);
                                         'MTA-STS Record Exists?' = $dataCollection.MTASTS.DNSRecord -like "v=STSv1*";
                                         'MTA-STS Policy Mode' = $dataCollection.MTASTS.Mode;
                                         'MTA-STS Allowed MX Hosts' = $dataCollection.MTASTS.AllowedMX;
                                         'DNS Registrar' = (Check-DnsNameAdministrator $dataCollection);
                                         'DNS Host' = (Check-DnsHostingProvider $dataCollection);
                                         'DNSSEC DNSKEY Record Exists?' = $dataCollection.DNSSEC.DNSKeyExists;
-                                        #'ADFS Host' = (Determine-AdfsFederationMetadataUrl $domain)
                                         })
     }
 }
