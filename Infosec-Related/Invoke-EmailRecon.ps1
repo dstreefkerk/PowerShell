@@ -678,7 +678,7 @@ process {
                                         'M365 Tenant Name' = (Determine-O365DomainTenantName $dataCollection);
                                         'M365 MOERA Domain' = (Determine-M365MOERAName $dataCollection);
                                         'M365 MOERA Domain DMARC Record' = (Determine-M365MOERADMARC $dataCollection);
-                                        'M365 Domains' = (Determine-M365Domains -DomainName $domain);
+                                        'M365 Domains' = $dataCollection.M365DOMAINS -join ',';
                                         'M365 DKIM Enabled?' = (Determine-O365Dkim $dataCollection);
                                         'M365 Federated?' = (Determine-O365IsFederated $dataCollection);
                                         'M365 Federation Provider' = (Determine-O365FederationProvider $dataCollection);
