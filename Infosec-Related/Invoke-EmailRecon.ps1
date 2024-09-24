@@ -404,19 +404,19 @@ begin {
 
     # Determine if DMARC is enabled for the MOERA domain
     function Determine-M365MOERADMARC ([psobject]$DomainData) {
-        $MOERA = $DomainData.M365DOMAINS | Where-Object {$_ -like "*.mail.onmicrosoft.com"}
+        $MOERA = $DomainData.M365DOMAINS | Where-Object {$_ -like "*.onmicrosoft.com"}
 
         $MOERADomain = $MOERA | Select-Object -First 1
 
         if ($null -eq $MOERADomain) { return }
 
-        $MOERATXTRecords = Resolve-DnsName -Name $MOERADomain -Type TXT
+        $MOERATXTRecords = Resolve-DnsName -Name "_dmarc.$($MOERADomain)" -Type TXT -ErrorAction SilentlyContinue
 
         if ($null -eq $MOERATXTRecords) {
             return ""
         }
 
-        $MOERATXTRecords | Where-Object {$_.Strings -like '*v=DMARC1*'} -ErrorAction SilentlyContinue
+        $MOERATXTRecords | Where-Object {$_.Strings -like '*v=DMARC1*'} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Strings
     }
 
     # Determine who's handling inbound emails, based on the hostname in the lowest preference MX record
@@ -748,6 +748,7 @@ process {
             FEDERATION = Get-DomainFederationDataFromO365 -DomainName $domain
             DNSSEC = Get-DNSSECDetails -DomainName $domain
             M365DOMAINS = Get-M365Domains -DomainName $domain
+            #M365MOERADOMAIN = Determine-M365MOERAName
         }
 
         $ErrorActionPreference = 'Continue'
