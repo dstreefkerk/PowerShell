@@ -282,7 +282,7 @@ begin {
         $txtVerificationRecord = $DomainData.TXT | Where-Object {$_.Strings -like 'MS=ms*'} -ErrorAction SilentlyContinue
         if ($txtVerificationRecord) {$isOffice365Tenant = 'Possibly'}
 
-        $mdmRecord = $DomainData.ENTERPRISEREGISTRATION | Where-Object {$_.NameHost -eq 'enterpriseregistration.windows.net '} -ErrorAction SilentlyContinue
+        $mdmRecord = $DomainData.ENTERPRISEREGISTRATION | Where-Object {$_.NameHost -eq 'enterpriseregistration.windows.net'} -ErrorAction SilentlyContinue
         if ($mdmRecord) {$isOffice365Tenant = 'Likely'}
 
         $autoDiscoverRecord = $DomainData.AUTODISCOVER | Where-Object {$_.NameHost -eq 'autodiscover.outlook.com'} -ErrorAction SilentlyContinue
