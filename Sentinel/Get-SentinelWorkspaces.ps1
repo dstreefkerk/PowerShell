@@ -2,7 +2,7 @@
 
 <#
 .SYNOPSIS
-Retrieves Microsoft Sentinel-enabled Log Analytics workspaces.
+Retrieves Microsoft Sentinel-enabled Log Analytics workspaces. Useful for Lighthouse scenarios where multiple tenants are managed.
 
 .DESCRIPTION
 This script retrieves all subscriptions available in the current context, enumerates the Log Analytics workspaces for each subscription, and checks whether Microsoft Sentinel (SecurityInsights) is enabled on each workspace by matching the ResourceId field. If Sentinel is detected, the script outputs a custom object with workspace details.
@@ -12,11 +12,15 @@ This script retrieves all subscriptions available in the current context, enumer
 
 Displays all Sentinel-enabled workspaces with verbose logging enabled.
 
-.AUTHOR
-ChatGPT - 07 February 2025
+.EXAMPLE
+.\Get-SentinelWorkspaces.ps1 -Verbose | Export-Csv -Path SentinelWorkspaces.csv -NoTypeInformation
+
+Exports the list of Sentinel-enabled workspaces to a CSV file.
 
 .NOTES
-Ensure that the required Az modules are installed.
+By: Daniel Streefkerk
+Date: 07 February 2025
+
 #>
 
 [CmdletBinding()]
@@ -26,15 +30,16 @@ param()
 Write-Verbose "Retrieving subscriptions available in the current context"
 $subscriptions = Get-AzSubscription
 
-# Initialise an array to store Sentinel workspace objects.
-$sentinelWorkspaces = @()
-
 foreach ($sub in $subscriptions) {
     Write-Verbose "Processing subscription '$($sub.Name)' (ID: $($sub.Id))"
 
-    # Set the context to the current subscription.
-    Set-AzContext -SubscriptionId $sub.Id -ErrorAction Stop
+    # Set the context to the current subscription to ensure correct resource retrieval.
+    Set-AzContext -SubscriptionId $sub.Id -ErrorAction Stop | Out-Null
     Write-Verbose "Context set to subscription ID: $($sub.Id)"
+
+    # Retrieve tenant details associated with the current subscription.
+    Write-Verbose "Retrieving tenant details for subscription: $($sub.Name)"
+    $tenant = Get-AzTenant -TenantId $sub.TenantId
 
     # Retrieve all Log Analytics workspaces for the current subscription.
     Write-Verbose "Retrieving Log Analytics workspaces for subscription ID: $($sub.Id)"
@@ -50,11 +55,30 @@ foreach ($sub in $subscriptions) {
 
         if ($sentinelSolution) {
             Write-Verbose "Sentinel detected on workspace '$($workspace.Name)'. Adding to results."
-            $sentinelWorkspaces += [PSCustomObject]@{
-                Name           = $workspace.Name
-                ResourceGroup  = $workspace.ResourceGroupName
-                TenantId       = $sub.TenantId
-                SubscriptionId = $sub.Id
+
+            # Process tags into a formatted string, ensuring keys and values are uppercase for consistency.
+            $tagString = if ($workspace.Tags) { 
+                ($workspace.Tags.GetEnumerator() | 
+                    Sort-Object Key | 
+                    ForEach-Object { "$($_.Key.ToUpper())=$($_.Value.ToString().ToUpper())" }) -join "; "
+            } else { 
+                "NO TAGS" 
+            }
+
+            # Output Sentinel-enabled workspace details as a custom object.
+            [PSCustomObject]@{
+                ID               = $workspace.CustomerId
+                Name             = $workspace.Name.ToUpper()
+                ResourceGroup    = $workspace.ResourceGroupName.ToUpper()
+                Location         = $workspace.Location
+                SKU              = $workspace.Sku
+                Retention        = $workspace.retentionInDays
+                Created          = $workspace.CreatedDate
+                TenantID         = $sub.TenantId
+                TenantName       = $tenant.Name
+                SubscriptionID   = $sub.Id
+                SubscriptionName = $sub.Name.ToUpper()
+                Tags             = $tagString
             }
         }
         else {
@@ -62,7 +86,3 @@ foreach ($sub in $subscriptions) {
         }
     }
 }
-
-Write-Verbose "Returning Sentinel workspace objects"
-# Output the Sentinel workspace objects to the pipeline.
-$sentinelWorkspaces
