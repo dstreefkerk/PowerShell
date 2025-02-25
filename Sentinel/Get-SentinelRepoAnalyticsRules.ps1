@@ -32,8 +32,8 @@ Date: 25 February 2025
 Version: 1.0
 
 REQUIREMENTS
-- PowerShell-Yaml module must be installed.
-- Git must be installed and available in the system PATH.
+- PowerShell-Yaml module must be installed: https://www.powershellgallery.com/packages/powershell-yaml/0.4.7
+- Git must be installed and available in the system PATH: https://git-scm.com/downloads
 
 .LINK
 TBA
