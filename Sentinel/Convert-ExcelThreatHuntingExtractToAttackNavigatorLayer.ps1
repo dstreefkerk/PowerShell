@@ -1,4 +1,4 @@
-﻿#Requires -Modules ImportExcel
+#Requires -Modules ImportExcel
 
 <#
 .SYNOPSIS
@@ -16,8 +16,8 @@ PS> Convert-ExcelThreatHuntingExtractToAttackNavigatorLayer.ps1 -InputExcelPath 
 
 .NOTES
 Author: Daniel Streefkerk
-Version: 1.0
-Date: 20 Feb 2025
+Version: 1.1
+Date: 20 March 2025
 #>
 
 [CmdletBinding()]
@@ -102,11 +102,11 @@ try {
             continue
         }
 
-        # Extract MITRE tactics from tags
-        $tactics = ($tags | Where-Object { $_.name -eq "tactics" }).value
+        # Extract MITRE tactics from tags, ensuring 'value' property exists
+        $tactics = ($tags | Where-Object { $_.name -eq "tactics" -and $_.PSObject.Properties['value'] }) | ForEach-Object { $_.value }
 
-        # Skip queries without MITRE tactics
-        if (-not $tactics) {
+        # Skip queries without MITRE tactics (handles null, empty, and whitespace-only strings)
+        if ([string]::IsNullOrWhiteSpace($tactics)) {
             Write-Output "No MITRE tactics found for query: $($query.displayName)"
             continue
         }
