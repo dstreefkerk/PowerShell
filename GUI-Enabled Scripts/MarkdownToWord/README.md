@@ -6,6 +6,8 @@ A simple Windows utility that converts Markdown content to professionally format
 
 This tool provides an easy-to-use interface for converting Markdown text to Word (.docx) documents. Simply paste your Markdown content, choose where to save the output file, and convert with a single click.
 
+![Markdown to Word Screenshot](screenshot.png)
+
 ## Features
 
 - Friendly user interface for editing and converting Markdown
