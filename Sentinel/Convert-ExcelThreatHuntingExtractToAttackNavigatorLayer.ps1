@@ -16,8 +16,9 @@ PS> Convert-ExcelThreatHuntingExtractToAttackNavigatorLayer.ps1 -InputExcelPath 
 
 .NOTES
 Author: Daniel Streefkerk
-Version: 1.1
-Date: 20 March 2025
+Version: 1.2
+Date: 9 April 2025
+Updated to prioritize techniques tag over tactic-to-technique mapping
 #>
 
 [CmdletBinding()]
@@ -102,34 +103,56 @@ try {
             continue
         }
 
+        # First, check if specific techniques are defined in the tags
+        $specificTechniques = ($tags | Where-Object { $_.name -eq "techniques" -and $_.PSObject.Properties['value'] }) | ForEach-Object { $_.value }
+        
         # Extract MITRE tactics from tags, ensuring 'value' property exists
         $tactics = ($tags | Where-Object { $_.name -eq "tactics" -and $_.PSObject.Properties['value'] }) | ForEach-Object { $_.value }
 
-        # Skip queries without MITRE tactics (handles null, empty, and whitespace-only strings)
-        if ([string]::IsNullOrWhiteSpace($tactics)) {
-            Write-Output "No MITRE tactics found for query: $($query.displayName)"
+        # Skip queries without MITRE tactics or techniques
+        if ([string]::IsNullOrWhiteSpace($tactics) -and [string]::IsNullOrWhiteSpace($specificTechniques)) {
+            Write-Output "No MITRE tactics or techniques found for query: $($query.displayName)"
             continue
         }
 
-        # Map tactics to techniques using MITRE framework
-        foreach ($tactic in $tactics -split ",") {
-            $techniques = $MitreMapping[$tactic]
-            if (-not $techniques) {
-                Write-Output "No techniques mapped for tactic: $tactic"
-                continue
-            }
-
-            # Increment technique score and track query references
-            foreach ($technique in $techniques) {
-                if (-not $techniqueMap.ContainsKey($technique)) {
-                    $techniqueMap[$technique] = @{
+        # If specific techniques are provided, use those directly
+        if (-not [string]::IsNullOrWhiteSpace($specificTechniques)) {
+            foreach ($technique in $specificTechniques -split ",") {
+                $techniqueID = $technique.Trim()
+                
+                if (-not $techniqueMap.ContainsKey($techniqueID)) {
+                    $techniqueMap[$techniqueID] = @{
                         Score = 0
                         Queries = @()
                     }
                 }
                 
-                $techniqueMap[$technique].Score++
-                $techniqueMap[$technique].Queries += $query.displayName
+                $techniqueMap[$techniqueID].Score++
+                $techniqueMap[$techniqueID].Queries += $query.displayName
+            }
+        }
+        # Only use tactic-to-technique mapping if no specific techniques are provided
+        elseif (-not [string]::IsNullOrWhiteSpace($tactics)) {
+            # Map tactics to techniques using MITRE framework
+            foreach ($tactic in $tactics -split ",") {
+                $techniques = $MitreMapping[$tactic.Trim()]
+                if (-not $techniques) {
+                    Write-Output "No techniques mapped for tactic: $tactic"
+                    continue
+                }
+
+                # Increment technique score and track query references
+                foreach ($technique in $techniques) {
+                    if (-not $techniqueMap.ContainsKey($technique)) {
+                        $techniqueMap[$technique] = @{
+                            Score = 0
+                            Queries = @()
+                        }
+                    }
+                    
+                    $techniqueMap[$technique].Score++
+                    $techniqueMap[$technique].Queries += $query.displayName
+                }
             }
         }
     }
