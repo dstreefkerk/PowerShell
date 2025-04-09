@@ -24,7 +24,7 @@ This tool provides an easy-to-use interface for converting Markdown text to Word
 ## Getting Started
 
 1. **Download and install Pandoc** from [pandoc.org/installing.html](https://pandoc.org/installing.html)
-2. **Download** the `MarkdownToWord.ps1` script
+2. **[Download](MarkdownToWord.ps1)** the `MarkdownToWord.ps1` script
 3. **Remove the Mark of the Web** if needed by right-clicking the script file, selecting Properties, and ticking the "Unblock" checkbox near the bottom of the window
 4. **Run the script** by right-clicking and selecting "Run with PowerShell"
 
