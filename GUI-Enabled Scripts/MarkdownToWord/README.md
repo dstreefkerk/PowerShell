@@ -116,4 +116,4 @@ To reduce file size:
 
 ## Need More Help?
 
-See the [Pandoc documentation](https://pandoc.org/MANUAL.html) for advanced usage information.
+Sorry, this is provided as-is. Still, you'll get far by copying and pasting the [source code](MarkdownToWord.ps1) into a [ChatGPT](https://chatgpt.com) or [Claude](https://claude.ai) chat, and asking questions of it.
