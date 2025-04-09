@@ -35,7 +35,7 @@ This tool provides an easy-to-use interface for converting Markdown text to Word
 3. **Optional:** Select a Word template (.dotx or .docx) to use its styles
 4. **Click Convert** to generate your Word document
 
-## Using Templates
+## Styling Your Document
 
 To apply consistent formatting:
 
@@ -58,6 +58,28 @@ If you can't save the output file:
 - Check that you have write permission to the selected folder
 - Try saving to your Documents folder instead
 - Run PowerShell as administrator if needed
+
+## Frequently Asked Questions
+
+### Does this work on a Mac?
+
+No, this specific PowerShell script is designed for Windows systems only. However, Pandoc itself (the underlying conversion tool) works on macOS, Linux, and Windows. Mac users can:
+- Install Pandoc using Homebrew: `brew install pandoc`
+- Use Pandoc directly from the command line: `pandoc -f markdown -t docx -o output.docx input.md`
+- Consider alternative GUI applications for Markdown to Word conversion on macOS
+
+### How do I reduce the Word document's file size?
+
+If your converted document is larger than expected, this may be due to:
+1. **Embedded fonts**: Pandoc or the original template document might embed fonts, increasing file size
+2. **Hidden graphics**: Template documents sometimes contain graphics or other elements you don't need
+
+To reduce file size:
+- Open the generated document in Word
+- Go to File > Options > Save
+- Uncheck "Embed fonts in the file"
+- Remove any unnecessary styles, graphics, or other elements
+- Save as a new document
 
 ## Need More Help?
 
