@@ -59,6 +59,39 @@ If you can't save the output file:
 - Try saving to your Documents folder instead
 - Run PowerShell as administrator if needed
 
+## Nerdy Features
+
+This app is "vibe coded" (with some manual rewrites and guidance by me), but that doesn't mean I didn't pay attention to the small details. Here are some of the features you won't find in an app that was just a one-and-done vibe code project.
+
+### User Interface Features
+
+- Dynamic UI Elements
+  - Checkbox disabled automatically when no template is selected
+  - Convert button disabled when no content is available
+  - Monospaced font in the markdown editor
+  - Placeholder text that appears when fields are empty
+  - Text fields scroll automatically to show the end of long file paths
+
+- Smart File Dialogs
+  - Appropriate file filters for different document types
+  - Output file picker defaults to the desktop (handles OneDrive known folder redirection)
+  - Template file picker opens directly to Word's default User Templates folder, if it exists
+
+### Technical Features
+
+- Error Handling
+  - Error messages include suggested next steps
+  - Specific error messages for different failure scenarios
+  - Template file accessibility testing
+  - Verification that output files exist after reported success
+- File Management
+  - Proactive permission testing before saving files
+  - Proper handling of redirected folders like OneDrive
+  - Settings persist between sessions
+  - Temporary file cleanup even when errors occur
+- Dependency Management
+  - Pandoc installation check with helpful guidance
+
 ## Frequently Asked Questions
 
 ### Does this work on a Mac?
