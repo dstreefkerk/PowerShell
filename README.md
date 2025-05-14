@@ -18,3 +18,5 @@ This repository contains a variety of PowerShell scripts and resources, organise
 Each folder contains scripts tailored to its topic, ranging from automation and reporting to security and GUI tools.
 
 I've recently removed a bunch of old content and reorganised what's here. If you're after any old IT admin-style scripts that I previously hosted here, you can check them out in the repo history.
+
+Some of these scripts might still reference my old Twitter handle and my old IT blog which is now defunct. My current blog can be found at https://dstreefkerk.github.io
