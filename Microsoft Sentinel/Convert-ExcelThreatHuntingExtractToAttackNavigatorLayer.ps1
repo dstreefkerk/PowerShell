@@ -7,6 +7,7 @@ Converts Microsoft Sentinel Threat Hunting Queries from Excel to MITRE ATT&CK Na
 .DESCRIPTION
 This script processes an Excel export of Microsoft Sentinel Threat Hunting Queries and generates
 a MITRE ATT&CK Navigator layer file (v4.5 format) with technique scoring based on query coverage.
+Updated for MITRE ATT&CK v17.1 compatibility.
 
 .PARAMETER InputExcelPath
 Path to the input Excel file containing hunting queries data
@@ -16,9 +17,9 @@ PS> Convert-ExcelThreatHuntingExtractToAttackNavigatorLayer.ps1 -InputExcelPath 
 
 .NOTES
 Author: Daniel Streefkerk
-Version: 1.2
-Date: 9 April 2025
-Updated to prioritize techniques tag over tactic-to-technique mapping
+Version: 1.3
+Date: 30 May 2025
+Updated for MITRE ATT&CK v17.1 framework compatibility
 #>
 
 [CmdletBinding()]
@@ -157,17 +158,43 @@ try {
         }
     }
 
-    # Build layer structure
+    # Build layer structure for MITRE ATT&CK v17.1
     $layer = @{
         versions = @{
-            attack    = "16"
-            navigator = "4.9.0"
+            attack    = "17"
+            navigator = "5.1.0"
             layer     = "4.5"
         }
-        name     = "Microsoft Sentinel Threat Hunting Coverage"
-        domain   = "enterprise-attack"
-        description = "Automatically generated from Sentinel Threat Hunting Queries"
-        techniques = @()
+        name        = "Microsoft Sentinel Threat Hunting Coverage"
+        domain      = "enterprise-attack"
+        description = "Automatically generated from Sentinel Threat Hunting Queries - MITRE ATT&CK v17.1"
+        filters     = @{
+            platforms = @("Windows", "Linux", "macOS", "Network Devices", "ESXi", "PRE", "Containers", "IaaS", "SaaS", "Office Suite", "Identity Provider")
+        }
+        sorting     = 0
+        layout      = @{
+            layout           = "side"
+            aggregateFunction = "average"
+            showID          = $false
+            showName        = $true
+            showAggregateScores = $false
+            countUnscored   = $false
+            expandedSubtechniques = "none"
+        }
+        hideDisabled = $false
+        techniques   = @()
+        gradient     = @{
+            colors    = @("#ff6666ff", "#ffe766ff", "#8ec843ff")
+            minValue  = 0
+            maxValue  = 100
+        }
+        legendItems = @()
+        metadata    = @()
+        links       = @()
+        showTacticRowBackground = $false
+        tacticRowBackground    = "#dddddd"
+        selectTechniquesAcrossTactics = $true
+        selectSubtechniquesWithParent = $false
     }
 
     # For each technique, generate hashtable with scores and comments
@@ -175,8 +202,12 @@ try {
         $layer.techniques += @{
             techniqueID = $technique.Name
             score       = $technique.Value.Score
+            color       = ""
             comment     = ($technique.Value.Queries -join "`n`n")
             enabled     = $true
+            metadata    = @()
+            links       = @()
+            showSubtechniques = $false
         }
     }
 
@@ -186,7 +217,8 @@ try {
     # Export JSON
     $layer | ConvertTo-Json -Depth 10 | Out-File -FilePath $OutputJsonPath -Encoding utf8
 
-    Write-Output "Layer file generated at: $OutputJsonPath"
+    Write-Output "MITRE ATT&CK v17.1 layer file generated at: $OutputJsonPath"
+    Write-Output "Processed $($techniqueMap.Count) unique techniques from $($queries.Count) hunting queries"
 }
 catch {
     Write-Error "Processing failed: $_"
