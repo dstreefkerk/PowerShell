@@ -440,7 +440,7 @@ begin {
             '*firstwave.com.au' { $determination = "FirstWave (AU)"}
             '*in.mailcontrol.com' { $determination = "Forcepoint (Formerly Websense)" }
             '*iphmx*' { $determination = "Cisco Email Security (Formerly IronPort Cloud)" }
-			'*.itoncloud.com' { $determination = "ITonCloud (AU)" }
+	    '*.itoncloud.com' { $determination = "ITonCloud (AU)" }
             'mx*.mailcluster.com.au' { $determination = "Digital Pacific (AU)" } # https://support.digitalpacific.com.au/en/knowledgebase/article/what-are-digital-pacifics-mx-records
             'mx.us.mailmarshal.cloud' { $determination = "Trustwave MailMarshal Cloud (US)" } # https://support.trustwave.com/MailMarshalCloud/kb/item.asp?id=21095&Keywords=#mx
             'mx.au.mailmarshal.cloud' { $determination = "Trustwave MailMarshal Cloud (AU)" } # https://support.trustwave.com/SEGCloud/kb/item.asp?id=21149#mx
@@ -456,7 +456,7 @@ begin {
             '*nexon.com.au*' { $determination = "Nexon (AU MSP)" }
             '*trendmicro*' { $determination = "Trend Micro" }
             '*.secureintellicentre.net.au' { $determination = "Macquarie Government (AU)" }
-	        'seg.trustwave.com' { $determination = "Trustwave Secure Email Gateway Cloud" }
+	    'seg.trustwave.com' { $determination = "Trustwave Secure Email Gateway Cloud" }
             '*.sendgrid.net' { $determination = "SendGrid" }
             '*.mtaroutes.com' { $determination = "Solarwinds Mail Assure" }
             '*.sge.net' { $determination = "Verizon Business (ex CyberTrust)" }
@@ -468,6 +468,7 @@ begin {
             'us*mimecast*' { $determination = "Mimecast (US)" }
             '*us-west*.sophos.com' { $determination = "Sophos (US West)" }
             '*us-east*.sophos.com' { $determination = "Sophos (US East)" }
+	    '*.mx.microsoft' { $determination = "Microsoft Exchange Online" }
             "*$($domainData.SOA.Name)" { $determination = "Self-Hosted"}
             "" { $determination = "NO MX RECORD FOUND"}
 
