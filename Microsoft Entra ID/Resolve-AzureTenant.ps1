@@ -19,6 +19,7 @@
     
     Output includes:
     - Organisation name and tenant identification
+    - MOERA domain discovery (organizational onmicrosoft.com domain)
     - Authentication endpoints and supported protocols
     - Security configuration (scopes, response types, signing algorithms)
     - Cloud environment and regional information
@@ -67,7 +68,7 @@
 
 .NOTES
     Author: Daniel Streefkerk
-    Version: 1.1
+    Version: 1.2
     Last Modified: 2025-07-28
     
     This script is designed for legitimate security research and tenant enumeration.
@@ -139,6 +140,7 @@ function Resolve-TenantDomain {
         Domain = $DomainName.ToLower().Trim()
         TenantId = $null
         OrganisationName = $null
+        MOERADomain = $null
         ResponseTime = 0
         ErrorMessage = $null
         Timestamp = Get-Date
@@ -181,6 +183,13 @@ function Resolve-TenantDomain {
             $result.OrganisationName = $userRealmInfo.OrganisationName
             $result.NameSpaceType = $userRealmInfo.NameSpaceType
             $result.IsFederated = $userRealmInfo.IsFederated
+        }
+        
+        # Discover MOERA domain
+        $moeraResult = Get-MOERADomain -OrganizationName $result.OrganisationName -DomainName $result.Domain
+        if ($moeraResult) {
+            $result.MOERADomain = $moeraResult
+            Write-Verbose "Discovered MOERA domain: $moeraResult"
         }
         
         # Try multiple domain formats for OIDC metadata
@@ -550,6 +559,161 @@ function Get-UserRealmInfo {
         $result.ResponseTime = $stopwatch.ElapsedMilliseconds
         $result.Error = $_.Exception.Message
         Write-Verbose "GetUserRealm error for $DomainName : $_"
+    }
+    
+    return $result
+}
+
+function Get-MOERADomain {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [string]$OrganizationName,
+        
+        [Parameter(Mandatory=$true)]
+        [string]$DomainName
+    )
+    
+    try {
+        # Generate up to 10 MOERA domain candidates
+        $candidates = Get-MOERADomainCandidates -OrganizationName $OrganizationName -DomainName $DomainName
+        
+        Write-Verbose "Generated $($candidates.Count) MOERA domain candidates for $DomainName"
+        
+        # Test candidates via DNS validation
+        foreach ($candidate in $candidates) {
+            Write-Verbose "Testing MOERA candidate: $candidate"
+            
+            $dnsResult = Test-MOERADomainDNS -DomainCandidate $candidate
+            if ($dnsResult.IsValid) {
+                Write-Verbose "SUCCESS: Validated MOERA domain: $candidate.onmicrosoft.com"
+                return "$candidate.onmicrosoft.com (Inferred)"
+            }
+            else {
+                Write-Verbose "FAILED: $candidate - $($dnsResult.Error)"
+            }
+        }
+        
+        Write-Verbose "No valid MOERA domain found after testing $($candidates.Count) candidates"
+        return $null
+    }
+    catch {
+        Write-Verbose "Error discovering MOERA domain: $_"
+        return $null
+    }
+}
+
+function Get-MOERADomainCandidates {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [string]$OrganizationName,
+        
+        [Parameter(Mandatory=$true)]
+        [string]$DomainName
+    )
+    
+    $candidates = @()
+    
+    # Normalize inputs
+    $domainBase = ($DomainName -replace '\..*$', '').ToLower()  # Remove TLD
+    
+    # Organization name candidates (if available) - highest priority
+    if ($OrganizationName) {
+        $orgNormalized = $OrganizationName.ToLower() -replace '[^a-z0-9]', ''  # Remove spaces/punctuation
+        
+        # 1. Full organization name compressed (HIGHEST PRIORITY)
+        if ($orgNormalized -and $orgNormalized.Length -ge 3) {
+            $candidates += $orgNormalized
+        }
+        
+        # 2. Organization acronym (first letters of words)
+        $words = @($OrganizationName.Split(' ', [StringSplitOptions]::RemoveEmptyEntries))
+        if ($words.Count -ge 2) {
+            $acronym = ($words | ForEach-Object { $_[0] }) -join ''
+            if ($acronym.Length -ge 2 -and $acronym.Length -le 6) {
+                $candidates += $acronym.ToLower()
+            }
+        }
+        
+        # 3. Organization without common suffixes (lower priority than full name)
+        $suffixRemoved = $orgNormalized -replace '(ltd|inc|corp|group|company|corporation|limited|llc)$', ''
+        if ($suffixRemoved -and $suffixRemoved.Length -ge 3 -and $suffixRemoved -ne $orgNormalized) {
+            $candidates += $suffixRemoved
+        }
+    }
+    
+    # Domain name candidates
+    # 4. Domain base name (remove TLD)
+    if ($domainBase -and $domainBase.Length -ge 3) {
+        $candidates += $domainBase
+    }
+    
+    # 5. Domain base without common prefixes (www, mail, etc.)
+    $domainCleaned = $domainBase -replace '^(www|mail|email|mx|smtp)', ''
+    if ($domainCleaned -and $domainCleaned.Length -ge 3 -and $domainCleaned -ne $domainBase) {
+        $candidates += $domainCleaned
+    }
+    
+    # 6-10. Additional conservative variations
+    # Remove risky individual word matching to avoid false positives
+    # Focus on more reliable patterns only
+    
+    # Deduplicate and limit to 10, prioritizing earlier entries
+    $uniqueCandidates = @()
+    if ($candidates) {
+        foreach ($candidate in $candidates) {
+            if ($candidate -and $candidate.Length -ge 3 -and $candidate.Length -le 64 -and $uniqueCandidates -notcontains $candidate) {
+                $uniqueCandidates += $candidate
+                if ($uniqueCandidates.Count -ge 10) { break }
+            }
+        }
+    }
+    
+    return $uniqueCandidates
+}
+
+function Test-MOERADomainDNS {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$DomainCandidate
+    )
+    
+    $result = @{
+        IsValid = $false
+        Error = $null
+        MXRecord = $null
+    }
+    
+    try {
+        # Rate limiting for DNS queries
+        Start-Sleep -Milliseconds 100
+        
+        $fullDomain = "$DomainCandidate.onmicrosoft.com"
+        
+        # Test DNS MX record with shorter timeout for performance
+        $mxRecords = Resolve-DnsName -Name $fullDomain -Type MX -ErrorAction Stop
+        
+        if ($mxRecords) {
+            # Filter to actual MX records (not SOA)
+            $actualMX = $mxRecords | Where-Object { $_.Type -eq 'MX' }
+            
+            if ($actualMX) {
+                # Accept any MX record as valid MOERA domain
+                $result.IsValid = $true
+                $result.MXRecord = $actualMX[0].NameExchange
+            }
+            else {
+                $result.Error = "No MX records found in response"
+            }
+        }
+        else {
+            $result.Error = "No DNS records found"
+        }
+    }
+    catch {
+        $result.Error = $_.Exception.Message
     }
     
     return $result
