@@ -19,7 +19,7 @@
     
     Output includes:
     - Organisation name and tenant identification
-    - MOERA domain discovery (organizational onmicrosoft.com domain)
+    - MOERA domain discovery (organisational onmicrosoft.com domain)
     - Authentication endpoints and supported protocols
     - Security configuration (scopes, response types, signing algorithms)
     - Cloud environment and regional information
@@ -582,15 +582,23 @@ function Get-MOERADomain {
         
         # Test candidates via DNS validation
         foreach ($candidate in $candidates) {
-            Write-Verbose "Testing MOERA candidate: $candidate"
+            Write-Verbose "Testing MOERA candidate: $($candidate.Domain) ($($candidate.Type))"
             
-            $dnsResult = Test-MOERADomainDNS -DomainCandidate $candidate
+            $dnsResult = Test-MOERADomainDNS -DomainCandidate $candidate.Domain
             if ($dnsResult.IsValid) {
-                Write-Verbose "SUCCESS: Validated MOERA domain: $candidate.onmicrosoft.com"
-                return "$candidate.onmicrosoft.com (Inferred)"
+                # Apply confidence-based suffix
+                $moeraResult = "$($candidate.Domain).onmicrosoft.com"
+                if ($candidate.Confidence -eq 'High') {
+                    Write-Verbose "SUCCESS: High confidence MOERA domain: $moeraResult"
+                    return $moeraResult
+                }
+                else {
+                    Write-Verbose "SUCCESS: Medium confidence MOERA domain: $moeraResult"
+                    return "$moeraResult (Inferred)"
+                }
             }
             else {
-                Write-Verbose "FAILED: $candidate - $($dnsResult.Error)"
+                Write-Verbose "FAILED: $($candidate.Domain) - $($dnsResult.Error)"
             }
         }
         
@@ -618,41 +626,61 @@ function Get-MOERADomainCandidates {
     # Normalize inputs
     $domainBase = ($DomainName -replace '\..*$', '').ToLower()  # Remove TLD
     
-    # Organization name candidates (if available) - highest priority
+    # Organisation name candidates (if available) - highest priority
     if ($OrganizationName) {
         $orgNormalized = $OrganizationName.ToLower() -replace '[^a-z0-9]', ''  # Remove spaces/punctuation
         
-        # 1. Full organization name compressed (HIGHEST PRIORITY)
+        # 1. Full organisation name compressed (HIGHEST PRIORITY - HIGH CONFIDENCE)
         if ($orgNormalized -and $orgNormalized.Length -ge 3) {
-            $candidates += $orgNormalized
+            $candidates += @{
+                Domain = $orgNormalized
+                Confidence = 'High'
+                Type = 'FullOrgName'
+            }
         }
         
-        # 2. Organization acronym (first letters of words)
+        # 2. Organisation acronym (first letters of words) - MEDIUM CONFIDENCE
         $words = @($OrganizationName.Split(' ', [StringSplitOptions]::RemoveEmptyEntries))
         if ($words.Count -ge 2) {
             $acronym = ($words | ForEach-Object { $_[0] }) -join ''
             if ($acronym.Length -ge 2 -and $acronym.Length -le 6) {
-                $candidates += $acronym.ToLower()
+                $candidates += @{
+                    Domain = $acronym.ToLower()
+                    Confidence = 'Medium'
+                    Type = 'Acronym'
+                }
             }
         }
         
-        # 3. Organization without common suffixes (lower priority than full name)
+        # 3. Organisation without common suffixes - MEDIUM CONFIDENCE
         $suffixRemoved = $orgNormalized -replace '(ltd|inc|corp|group|company|corporation|limited|llc)$', ''
         if ($suffixRemoved -and $suffixRemoved.Length -ge 3 -and $suffixRemoved -ne $orgNormalized) {
-            $candidates += $suffixRemoved
+            $candidates += @{
+                Domain = $suffixRemoved
+                Confidence = 'Medium'
+                Type = 'SuffixRemoved'
+            }
         }
     }
     
-    # Domain name candidates
+    # Domain name candidates - MEDIUM CONFIDENCE
     # 4. Domain base name (remove TLD)
     if ($domainBase -and $domainBase.Length -ge 3) {
-        $candidates += $domainBase
+        $candidates += @{
+            Domain = $domainBase
+            Confidence = 'Medium'
+            Type = 'DomainBase'
+        }
     }
     
-    # 5. Domain base without common prefixes (www, mail, etc.)
+    # 5. Domain base without common prefixes (www, mail, etc.) - MEDIUM CONFIDENCE
     $domainCleaned = $domainBase -replace '^(www|mail|email|mx|smtp)', ''
     if ($domainCleaned -and $domainCleaned.Length -ge 3 -and $domainCleaned -ne $domainBase) {
-        $candidates += $domainCleaned
+        $candidates += @{
+            Domain = $domainCleaned
+            Confidence = 'Medium'
+            Type = 'DomainCleaned'
+        }
     }
     
     # 6-10. Additional conservative variations
@@ -663,9 +691,13 @@ function Get-MOERADomainCandidates {
     $uniqueCandidates = @()
     if ($candidates) {
         foreach ($candidate in $candidates) {
-            if ($candidate -and $candidate.Length -ge 3 -and $candidate.Length -le 64 -and $uniqueCandidates -notcontains $candidate) {
-                $uniqueCandidates += $candidate
-                if ($uniqueCandidates.Count -ge 10) { break }
+            if ($candidate -and $candidate.Domain -and $candidate.Domain.Length -ge 3 -and $candidate.Domain.Length -le 64) {
+                # Check if domain already exists
+                $existingDomain = $uniqueCandidates | Where-Object { $_.Domain -eq $candidate.Domain }
+                if (-not $existingDomain) {
+                    $uniqueCandidates += $candidate
+                    if ($uniqueCandidates.Count -ge 10) { break }
+                }
             }
         }
     }
