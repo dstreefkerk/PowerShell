@@ -284,8 +284,15 @@ function Get-LogicAppStandardWorkflows {
         
         # Use efficient foreach output capture pattern
         $workflows = foreach ($workflow in $response.value) {
+            # Extract just the workflow name (remove the Logic App prefix if present)
+            $workflowName = if ($workflow.name -match '/([^/]+)$') {
+                $matches[1]
+            } else {
+                $workflow.name
+            }
+
             [PSCustomObject]@{
-                Name         = $workflow.name
+                Name         = $workflowName
                 Id           = $workflow.id
                 Type         = $workflow.type
                 State        = Get-SafeProperty -Object $workflow -PropertyPath 'properties.flowState'
