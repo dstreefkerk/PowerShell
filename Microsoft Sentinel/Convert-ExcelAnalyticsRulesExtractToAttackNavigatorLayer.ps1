@@ -1,38 +1,58 @@
-#Requires -Modules ImportExcel
-
 <#
 .SYNOPSIS
-Converts Microsoft Sentinel Analytics Rules from Excel to MITRE ATT&CK Navigator layer file
+Converts Microsoft Sentinel Analytics Rules from Excel or CSV to MITRE ATT&CK Navigator layer file
 
 .DESCRIPTION
-This script processes an Excel export of Microsoft Sentinel Analytics Rules and generates
+This script processes an Excel or CSV export of Microsoft Sentinel Analytics Rules and generates
 a MITRE ATT&CK Navigator layer file (v4.5 format) with technique scoring based on rule coverage.
 Updated for MITRE ATT&CK v17.1 compatibility.
 
 .PARAMETER InputExcelPath
 Path to the input Excel file containing analytics rules data
 
+.PARAMETER InputCsvPath
+Path to the input CSV file containing analytics rules data
+
 .EXAMPLE
-PS> Convert-ExcelToMitreLayer -InputExcelPath .\sentinel_rules.xlsx
+PS> .\Convert-ExcelAnalyticsRulesExtractToAttackNavigatorLayer.ps1 -InputExcelPath .\sentinel_rules.xlsx
+
+.EXAMPLE
+PS> .\Convert-ExcelAnalyticsRulesExtractToAttackNavigatorLayer.ps1 -InputCsvPath .\sentinel_rules.csv
 
 .NOTES
 Author: Daniel Streefkerk
-Version: 2.0.0
-Date: 29 May 2025
+Version: 2.1.0
+Date: 2 October 2025
 Updated for MITRE ATT&CK v17.1 compatibility
 TODO: Handle sub-techniques
 #>
 
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Excel')]
 param(
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'Excel')]
     [ValidateScript({Test-Path $_ -PathType Leaf})]
-    [string]$InputExcelPath
+    [ValidatePattern('\.xlsx$')]
+    [string]$InputExcelPath,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'CSV')]
+    [ValidateScript({Test-Path $_ -PathType Leaf})]
+    [ValidatePattern('\.csv$')]
+    [string]$InputCsvPath
 )
 
 begin {
     Set-StrictMode -Version Latest
     $ErrorActionPreference = 'Stop'
+
+    # Check for ImportExcel module if using Excel parameter set
+    if ($PSCmdlet.ParameterSetName -eq 'Excel') {
+        if (-not (Get-Module -ListAvailable -Name ImportExcel)) {
+            throw "ImportExcel module is required for Excel input. Install it with: Install-Module -Name ImportExcel"
+        }
+    }
+
+    # Consolidate input path
+    $InputPath = if ($PSCmdlet.ParameterSetName -eq 'Excel') { $InputExcelPath } else { $InputCsvPath }
 
     # Initialize MITRE technique tracking
     $techniqueMap = @{}
@@ -40,8 +60,12 @@ begin {
 
 process {
     try {
-        # Import Excel data
-        $rules = Import-Excel -Path $InputExcelPath
+        # Import data based on parameter set
+        $rules = if ($PSCmdlet.ParameterSetName -eq 'Excel') {
+            Import-Excel -Path $InputPath
+        } else {
+            Import-Csv -Path $InputPath
+        }
 
         # Filter out disabled rules
         $rules = $rules | Where-Object {$_.status -notlike "false"}
@@ -147,7 +171,7 @@ process {
         }
 
         # Generate output file path with .json extension
-        $OutputJsonPath = [System.IO.Path]::ChangeExtension($InputExcelPath, ".json")
+        $OutputJsonPath = [System.IO.Path]::ChangeExtension($InputPath, ".json")
 
         # Export JSON
         $layer | ConvertTo-Json -Depth 10 | Out-File -FilePath $OutputJsonPath -Encoding utf8
