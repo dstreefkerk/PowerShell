@@ -37,6 +37,12 @@
 .PARAMETER IncludeUnauthorised
     Include unauthorised and not configured services in the output. By default, only authorised services are shown.
 
+.PARAMETER IPAddress
+    Additional IPv4 address(es) or CIDR range(s) to test beyond the built-in service providers.
+    Accepts individual IP addresses (e.g., "1.2.3.4") or CIDR notation (e.g., "1.2.3.0/24").
+    For CIDR ranges, the first usable host IP is extracted and tested.
+    This allows testing of custom or undocumented email service IP ranges.
+
 .EXAMPLE
     .\Invoke-ProofpointSPFFingerprint.ps1 -Domain "example.com"
 
@@ -63,6 +69,22 @@
     .\Invoke-ProofpointSPFFingerprint.ps1 -Domain "contoso.com" | Where-Object {$_.IsAuthorised -eq $true}
 
     Returns only the authorised email services for contoso.com.
+
+.EXAMPLE
+    .\Invoke-ProofpointSPFFingerprint.ps1 -Domain "example.com" -IPAddress "1.2.3.4"
+
+    Tests the standard service providers plus a custom IP address (1.2.3.4).
+
+.EXAMPLE
+    .\Invoke-ProofpointSPFFingerprint.ps1 -Domain "example.com" -IPAddress "4.171.31.152/30","4.190.136.180/30","4.200.251.84/30"
+
+    Tests the standard service providers plus three Azure CIDR ranges. For each CIDR range,
+    the first usable host IP is extracted and tested (e.g., 4.171.31.153 from 4.171.31.152/30).
+
+.EXAMPLE
+    .\Invoke-ProofpointSPFFingerprint.ps1 -Domain "example.com" -IPAddress "10.0.0.1","192.168.1.0/24" -Verbose
+
+    Tests custom IPs with verbose output showing CIDR-to-IP extraction and DNS query details.
 
 .EXAMPLE
     .\Invoke-ProofpointSPFFingerprint.ps1 -Domain "fabrikam.com" | Export-Csv -Path "C:\temp\spf-results.csv" -NoTypeInformation
@@ -97,7 +119,7 @@
 .NOTES
     NAME:    Invoke-ProofpointSPFFingerprint.ps1
     AUTHOR:  Daniel Streefkerk
-    VERSION: 1.1
+    VERSION: 1.2
 
     REQUIREMENTS:
         - PowerShell 5.1 or later
@@ -107,6 +129,14 @@
     PERFORMANCE:
         When processing multiple domains, service provider SPF records are resolved only once
         and reused for all domains, significantly improving efficiency for bulk scanning.
+
+    CUSTOM IP TESTING:
+        The -IPAddress parameter allows testing of custom IP addresses or CIDR ranges beyond
+        the built-in service provider database. This is useful for:
+        - Testing undocumented or proprietary email services
+        - Validating specific Azure, AWS, or GCP IP ranges
+        - Investigating suspicious or unknown email sources
+        - CIDR notation is supported (e.g., "10.0.0.0/24") with automatic extraction of test IPs
 
     SECURITY IMPLICATIONS:
         Organisations using Proofpoint Hosted SPF should understand that authorised email
@@ -147,13 +177,115 @@ param (
 
     [Parameter(Mandatory = $false,
         HelpMessage = "Include unauthorised and not configured services in output")]
-    [switch]$IncludeUnauthorised
+    [switch]$IncludeUnauthorised,
+
+    [Parameter(Mandatory = $false,
+        ValueFromPipelineByPropertyName = $true,
+        HelpMessage = "Additional IPv4 address(es) or CIDR range(s) to test (e.g., '1.2.3.4' or '1.2.3.0/24')")]
+    [ValidateScript({
+        foreach ($ip in $_) {
+            # Check if it's CIDR notation
+            if ($ip -match '^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/(\d+)$') {
+                $addr = $Matches[1]
+                $mask = [int]$Matches[2]
+
+                # Validate IP format and IPv4
+                $ipObj = $addr -as [ipaddress]
+                if ($null -eq $ipObj) {
+                    throw "Invalid IP address in CIDR notation: $ip"
+                }
+                if ($ipObj.AddressFamily -ne 'InterNetwork') {
+                    throw "Only IPv4 addresses are supported: $ip"
+                }
+
+                # Validate CIDR mask
+                if ($mask -lt 0 -or $mask -gt 32) {
+                    throw "Invalid CIDR mask in: $ip (must be 0-32)"
+                }
+            }
+            # Check if it's a plain IP address
+            else {
+                $ipObj = $ip -as [ipaddress]
+                if ($null -eq $ipObj) {
+                    throw "Invalid IP address format: $ip"
+                }
+                if ($ipObj.AddressFamily -ne 'InterNetwork') {
+                    throw "Only IPv4 addresses are supported: $ip"
+                }
+            }
+        }
+        $true
+    })]
+    [string[]]$IPAddress
 )
 
 begin {
     Set-StrictMode -Version Latest
 
     #region Helper Functions
+
+    <#
+    .SYNOPSIS
+        Extracts a test IP address from CIDR notation or returns the IP as-is.
+    .DESCRIPTION
+        For CIDR ranges, returns the first usable host IP (network address + 1).
+        For /32 ranges, returns the single IP.
+        For plain IP addresses, returns the IP unchanged.
+    #>
+    function Get-TestIPFromInput {
+        [CmdletBinding()]
+        param (
+            [Parameter(Mandatory = $true)]
+            [string]$IPInput
+        )
+
+        # Check if CIDR notation
+        if ($IPInput -match '^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/(\d+)$') {
+            $baseIP = $Matches[1]
+            $mask = [int]$Matches[2]
+
+            # For /32, return the single IP
+            if ($mask -eq 32) {
+                return $baseIP
+            }
+
+            # For /31, return the network address (no broadcast in /31)
+            if ($mask -eq 31) {
+                return $baseIP
+            }
+
+            # Calculate first usable host IP (network address + 1)
+            try {
+                $ipObj = [ipaddress]$baseIP
+                $ipBytes = $ipObj.GetAddressBytes()
+                [Array]::Reverse($ipBytes)
+                $ipInt = [BitConverter]::ToUInt32($ipBytes, 0)
+
+                # Calculate network address
+                $maskBits = [uint32]::MaxValue -shl (32 - $mask)
+                $networkInt = $ipInt -band $maskBits
+
+                # First usable host IP (network + 1)
+                $firstHostInt = $networkInt + 1
+
+                # Convert back to IP address
+                $firstHostBytes = [BitConverter]::GetBytes($firstHostInt)
+                [Array]::Reverse($firstHostBytes)
+                $firstHostIP = ([ipaddress]$firstHostBytes).ToString()
+
+                Write-Verbose "CIDR $IPInput -> Using test IP: $firstHostIP"
+                return $firstHostIP
+            }
+            catch {
+                Write-Warning "Failed to parse CIDR $IPInput, using base IP: $baseIP"
+                return $baseIP
+            }
+        }
+        else {
+            # Plain IP address
+            return $IPInput
+        }
+    }
 
     <#
     .SYNOPSIS
@@ -912,6 +1044,35 @@ process {
 
         Write-Progress -Activity "Processing Static IP Providers" -Completed
         Write-Verbose "Loaded $($script:emailServices.Count) total email service providers for testing ($successfullyResolved SPF-based, $totalStaticIP static IP-based)"
+
+        # Process custom IP addresses if provided
+        if ($PSBoundParameters.ContainsKey('IPAddress') -and $IPAddress.Count -gt 0) {
+            Write-Verbose "Processing $($IPAddress.Count) custom IP address(es)"
+            $customIPCount = 0
+
+            foreach ($customIP in $IPAddress) {
+                $customIPCount++
+                $testIP = Get-TestIPFromInput -IPInput $customIP
+
+                # Determine display name based on input format
+                $displayName = if ($customIP -match '/') {
+                    "Custom IP Range ($customIP)"
+                } else {
+                    "Custom IP ($customIP)"
+                }
+
+                Write-Verbose "Adding custom IP test: $displayName -> Test IP: $testIP"
+
+                $script:emailServices += [PSCustomObject]@{
+                    Name      = $displayName
+                    SPFDomain = $null
+                    TestIP    = $testIP
+                    TestIPs   = $null
+                }
+            }
+
+            Write-Verbose "Added $customIPCount custom IP test(s)"
+        }
 
         $script:emailServicesInitialized = $true
     }
