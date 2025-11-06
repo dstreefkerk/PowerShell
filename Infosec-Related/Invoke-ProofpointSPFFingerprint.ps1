@@ -31,7 +31,8 @@
     - Not configured: NXDOMAIN (IP range not in Proofpoint's configuration)
 
 .PARAMETER Domain
-    The domain name to fingerprint for authorised email services. Must be using Proofpoint Hosted SPF.
+    The domain name(s) to fingerprint for authorised email services. Must be using Proofpoint Hosted SPF.
+    Accepts a single domain or an array of domains. Also accepts pipeline input.
 
 .PARAMETER IncludeUnauthorised
     Include unauthorised and not configured services in the output. By default, only authorised services are shown.
@@ -41,6 +42,17 @@
 
     Fingerprints the email services authorised for example.com through Proofpoint Hosted SPF.
     Shows only authorised services.
+
+.EXAMPLE
+    .\Invoke-ProofpointSPFFingerprint.ps1 -Domain "example.com","contoso.com","fabrikam.com"
+
+    Fingerprints multiple domains in a single execution. SPF records for service providers are
+    resolved only once, improving efficiency when scanning multiple domains.
+
+.EXAMPLE
+    "example.com","contoso.com" | .\Invoke-ProofpointSPFFingerprint.ps1
+
+    Fingerprints multiple domains via pipeline input.
 
 .EXAMPLE
     .\Invoke-ProofpointSPFFingerprint.ps1 -Domain "contoso.com" -IncludeUnauthorised
@@ -66,7 +78,8 @@
     Use Format-List * (or fl *) to see all properties including QueryName, ResponseType, ResponseData, and AdditionalServices.
 
 .INPUTS
-    System.String
+    System.String[]
+    Accepts a single domain string or an array of domain strings via parameter or pipeline.
 
 .OUTPUTS
     PSCustomObject
@@ -84,12 +97,16 @@
 .NOTES
     NAME:    Invoke-ProofpointSPFFingerprint.ps1
     AUTHOR:  Daniel Streefkerk
-    VERSION: 1.0
+    VERSION: 1.1
 
     REQUIREMENTS:
         - PowerShell 5.1 or later
         - Network access to query DNS
-        - Domain must be using Proofpoint Hosted SPF
+        - Domain(s) must be using Proofpoint Hosted SPF
+
+    PERFORMANCE:
+        When processing multiple domains, service provider SPF records are resolved only once
+        and reused for all domains, significantly improving efficiency for bulk scanning.
 
     SECURITY IMPLICATIONS:
         Organisations using Proofpoint Hosted SPF should understand that authorised email
@@ -116,10 +133,17 @@ param (
     [Parameter(Mandatory = $true,
         ValueFromPipeline = $true,
         ValueFromPipelineByPropertyName = $true,
-        HelpMessage = "Domain name to fingerprint for Proofpoint Hosted SPF services")]
+        HelpMessage = "Domain name(s) to fingerprint for Proofpoint Hosted SPF services")]
     [ValidateNotNullOrEmpty()]
-    [ValidatePattern('^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$')]
-    [string]$Domain,
+    [ValidateScript({
+        foreach ($domain in $_) {
+            if ($domain -notmatch '^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$') {
+                throw "Invalid domain format: $domain"
+            }
+        }
+        $true
+    })]
+    [string[]]$Domain,
 
     [Parameter(Mandatory = $false,
         HelpMessage = "Include unauthorised and not configured services in output")]
@@ -833,160 +857,171 @@ begin {
     )
 
     #endregion
+
+    # Initialize email services list once (will be populated in process block on first run)
+    $script:emailServices = $null
+    $script:emailServicesInitialized = $false
 }
 
 process {
-    Write-Verbose "Starting fingerprint scan for domain: $Domain"
+    # Initialize email services on first domain (only once for efficiency)
+    if (-not $script:emailServicesInitialized) {
+        Write-Verbose "Initialising fingerprint scan with $($script:serviceProviders.Count) SPF-based email service providers"
+        Write-Verbose "Loaded $($script:staticIPProviders.Count) static IP-based email service providers"
+        Write-Verbose "Resolving SPF records to obtain test IP addresses"
 
-    # Validate domain is using Proofpoint Hosted SPF FIRST (before resolving 316+ SPF records)
-    if (-not (Test-ProofpointHostedSPF -DomainName $Domain)) {
-        $errorMessage = "Domain $Domain does not use Proofpoint Hosted SPF. Cannot perform fingerprinting."
-        Write-Error -Message $errorMessage -Category InvalidArgument -ErrorAction Stop
-        return
-    }
+        # Resolve SPF records and get test IPs
+        $script:emailServices = @()
+        $resolvedCount = 0
+        $totalServices = $script:serviceProviders.Count
 
-    # Domain is valid - now resolve SPF records for all service providers
-    Write-Verbose "Initialising fingerprint scan with $($script:serviceProviders.Count) SPF-based email service providers"
-    Write-Verbose "Loaded $($script:staticIPProviders.Count) static IP-based email service providers"
-    Write-Verbose "Resolving SPF records to obtain test IP addresses"
+        foreach ($provider in $script:serviceProviders) {
+            $resolvedCount++
+            Write-Progress -Activity "Resolving SPF Records" -Status "Processing $($provider.Name) ($resolvedCount of $totalServices)" -PercentComplete (($resolvedCount / $totalServices) * 100)
 
-    # Resolve SPF records and get test IPs
-    $script:emailServices = @()
-    $resolvedCount = 0
-    $totalServices = $script:serviceProviders.Count
+            $testIP = Get-FirstIPFromSPF -SPFDomain $provider.SPFDomain
 
-    foreach ($provider in $script:serviceProviders) {
-        $resolvedCount++
-        Write-Progress -Activity "Resolving SPF Records" -Status "Processing $($provider.Name) ($resolvedCount of $totalServices)" -PercentComplete (($resolvedCount / $totalServices) * 100)
-
-        $testIP = Get-FirstIPFromSPF -SPFDomain $provider.SPFDomain
-
-        $script:emailServices += [PSCustomObject]@{
-            Name      = $provider.Name
-            SPFDomain = $provider.SPFDomain
-            TestIP    = $testIP
-            TestIPs   = $null  # SPF-based providers use single TestIP, not TestIPs array
+            $script:emailServices += [PSCustomObject]@{
+                Name      = $provider.Name
+                SPFDomain = $provider.SPFDomain
+                TestIP    = $testIP
+                TestIPs   = $null  # SPF-based providers use single TestIP, not TestIPs array
+            }
         }
-    }
 
-    Write-Progress -Activity "Resolving SPF Records" -Completed
-    $successfullyResolved = @($script:emailServices | Where-Object { $null -ne $_.TestIP }).Count
-    Write-Verbose "Successfully resolved $successfullyResolved of $totalServices SPF records"
+        Write-Progress -Activity "Resolving SPF Records" -Completed
+        $successfullyResolved = @($script:emailServices | Where-Object { $null -ne $_.TestIP }).Count
+        Write-Verbose "Successfully resolved $successfullyResolved of $totalServices SPF records"
 
-    # Process static IP providers
-    Write-Verbose "Processing static IP-based providers"
-    $staticIPCount = 0
-    $totalStaticIP = $script:staticIPProviders.Count
+        # Process static IP providers
+        Write-Verbose "Processing static IP-based providers"
+        $staticIPCount = 0
+        $totalStaticIP = $script:staticIPProviders.Count
 
-    foreach ($provider in $script:staticIPProviders) {
-        $staticIPCount++
-        Write-Progress -Activity "Processing Static IP Providers" -Status "Processing $($provider.Name) ($staticIPCount of $totalStaticIP)" -PercentComplete (($staticIPCount / $totalStaticIP) * 100)
+        foreach ($provider in $script:staticIPProviders) {
+            $staticIPCount++
+            Write-Progress -Activity "Processing Static IP Providers" -Status "Processing $($provider.Name) ($staticIPCount of $totalStaticIP)" -PercentComplete (($staticIPCount / $totalStaticIP) * 100)
 
-        $script:emailServices += [PSCustomObject]@{
-            Name      = $provider.Name
-            SPFDomain = $null
-            TestIP    = $null
-            TestIPs   = $provider.TestIPs  # Multiple IPs to test
+            $script:emailServices += [PSCustomObject]@{
+                Name      = $provider.Name
+                SPFDomain = $null
+                TestIP    = $null
+                TestIPs   = $provider.TestIPs  # Multiple IPs to test
+            }
         }
+
+        Write-Progress -Activity "Processing Static IP Providers" -Completed
+        Write-Verbose "Loaded $($script:emailServices.Count) total email service providers for testing ($successfullyResolved SPF-based, $totalStaticIP static IP-based)"
+
+        $script:emailServicesInitialized = $true
     }
 
-    Write-Progress -Activity "Processing Static IP Providers" -Completed
-    Write-Verbose "Loaded $($script:emailServices.Count) total email service providers for testing ($successfullyResolved SPF-based, $totalStaticIP static IP-based)"
+    # Process each domain in the array
+    foreach ($currentDomain in $Domain) {
+        Write-Verbose "Starting fingerprint scan for domain: $currentDomain"
 
-    Write-Verbose "Fingerprinting $Domain for authorised email services"
-    Write-Verbose "Testing $($script:emailServices.Count) services"
+        # Validate domain is using Proofpoint Hosted SPF FIRST
+        if (-not (Test-ProofpointHostedSPF -DomainName $currentDomain)) {
+            $errorMessage = "Domain $currentDomain does not use Proofpoint Hosted SPF. Cannot perform fingerprinting."
+            Write-Error -Message $errorMessage -Category InvalidArgument
+            continue
+        }
 
-    $testedCount = 0
-    $totalToTest = $script:emailServices.Count
+        Write-Verbose "Fingerprinting $currentDomain for authorised email services"
+        Write-Verbose "Testing $($script:emailServices.Count) services"
 
-    # Test each service
-    foreach ($service in $script:emailServices) {
-        $testedCount++
-        Write-Progress -Activity "Testing Services" -Status "Testing $($service.Name) ($testedCount of $totalToTest)" -PercentComplete (($testedCount / $totalToTest) * 100)
+        $testedCount = 0
+        $totalToTest = $script:emailServices.Count
 
-        try {
-            # Check if this is a static IP provider with multiple IPs to test
-            if ($null -ne $service.TestIPs -and $service.TestIPs.Count -gt 0) {
-                # Static IP provider - test multiple IPs with optimization
-                $serviceAuthorised = $false
-                $finalResult = $null
+        # Test each service
+        foreach ($service in $script:emailServices) {
+            $testedCount++
+            Write-Progress -Activity "Testing Services for $currentDomain" -Status "Testing $($service.Name) ($testedCount of $totalToTest)" -PercentComplete (($testedCount / $totalToTest) * 100)
 
-                foreach ($testIP in $service.TestIPs) {
-                    Write-Verbose "Testing static IP provider $($service.Name) with IP: $testIP"
+            try {
+                # Check if this is a static IP provider with multiple IPs to test
+                if ($null -ne $service.TestIPs -and $service.TestIPs.Count -gt 0) {
+                    # Static IP provider - test multiple IPs with optimization
+                    $serviceAuthorised = $false
+                    $finalResult = $null
 
-                    $result = Test-ProofpointServiceAuthorisation -DomainName $Domain -ServiceName $service.Name -TestIP $testIP -ErrorAction Stop
+                    foreach ($testIP in $service.TestIPs) {
+                        Write-Verbose "Testing static IP provider $($service.Name) with IP: $testIP"
 
-                    if ($result.IsAuthorised) {
-                        # First IP is authorised - skip testing remaining IPs (optimization)
-                        Write-Verbose "$($service.Name): Authorised with IP $testIP - skipping remaining IPs"
-                        $finalResult = $result
-                        $serviceAuthorised = $true
-                        break
+                        $result = Test-ProofpointServiceAuthorisation -DomainName $currentDomain -ServiceName $service.Name -TestIP $testIP -ErrorAction Stop
+
+                        if ($result.IsAuthorised) {
+                            # First IP is authorised - skip testing remaining IPs (optimization)
+                            Write-Verbose "$($service.Name): Authorised with IP $testIP - skipping remaining IPs"
+                            $finalResult = $result
+                            $serviceAuthorised = $true
+                            break
+                        }
+                        else {
+                            # Store the last result in case none are authorised
+                            $finalResult = $result
+                        }
                     }
-                    else {
-                        # Store the last result in case none are authorised
-                        $finalResult = $result
+
+                    # Output based on IncludeUnauthorised switch
+                    if ($IncludeUnauthorised) {
+                        Write-Output $finalResult
+                    }
+                    elseif ($serviceAuthorised) {
+                        Write-Output $finalResult
                     }
                 }
+                else {
+                    # SPF-based provider with single TestIP
+                    $testIPParam = $null
+                    if ($null -ne $service.TestIP) {
+                        if ($service.TestIP -is [System.Array]) {
+                            # If it's an array, take the first element
+                            $testIPParam = $service.TestIP[0]
+                            Write-Verbose "Service $($service.Name) had array TestIP, using first element: $testIPParam"
+                        }
+                        elseif ($service.TestIP -is [string]) {
+                            $testIPParam = $service.TestIP
+                        }
+                        else {
+                            $testIPParam = $service.TestIP.ToString()
+                        }
+                    }
 
-                # Output based on IncludeUnauthorised switch
+                    $result = Test-ProofpointServiceAuthorisation -DomainName $currentDomain -ServiceName $service.Name -TestIP $testIPParam -ErrorAction Stop
+
+                    # Filter output based on IncludeUnauthorised switch
+                    if ($IncludeUnauthorised) {
+                        Write-Output $result
+                    }
+                    elseif ($result.IsAuthorised) {
+                        Write-Output $result
+                    }
+                }
+            }
+            catch {
+                Write-Verbose "Failed to test service $($service.Name): $($_.Exception.Message)"
+
+                # Output error result if IncludeUnauthorised is specified
                 if ($IncludeUnauthorised) {
-                    Write-Output $finalResult
-                }
-                elseif ($serviceAuthorised) {
-                    Write-Output $finalResult
-                }
-            }
-            else {
-                # SPF-based provider with single TestIP
-                $testIPParam = $null
-                if ($null -ne $service.TestIP) {
-                    if ($service.TestIP -is [System.Array]) {
-                        # If it's an array, take the first element
-                        $testIPParam = $service.TestIP[0]
-                        Write-Verbose "Service $($service.Name) had array TestIP, using first element: $testIPParam"
-                    }
-                    elseif ($service.TestIP -is [string]) {
-                        $testIPParam = $service.TestIP
-                    }
-                    else {
-                        $testIPParam = $service.TestIP.ToString()
-                    }
-                }
-
-                $result = Test-ProofpointServiceAuthorisation -DomainName $Domain -ServiceName $service.Name -TestIP $testIPParam -ErrorAction Stop
-
-                # Filter output based on IncludeUnauthorised switch
-                if ($IncludeUnauthorised) {
-                    Write-Output $result
-                }
-                elseif ($result.IsAuthorised) {
-                    Write-Output $result
+                    Write-Output ([PSCustomObject]@{
+                        PSTypeName         = 'ProofpointSPF.Result'
+                        Domain             = $currentDomain
+                        ServiceName        = $service.Name
+                        TestIP             = if ($service.TestIP) { $service.TestIP.ToString() } else { 'N/A' }
+                        QueryName          = 'N/A'
+                        IsAuthorised       = $false
+                        ResponseType       = 'Error'
+                        ResponseData       = $_.Exception.Message
+                        AdditionalServices = $null
+                    })
                 }
             }
         }
-        catch {
-            Write-Verbose "Failed to test service $($service.Name): $($_.Exception.Message)"
 
-            # Output error result if IncludeUnauthorised is specified
-            if ($IncludeUnauthorised) {
-                Write-Output ([PSCustomObject]@{
-                    PSTypeName         = 'ProofpointSPF.Result'
-                    Domain             = $Domain
-                    ServiceName        = $service.Name
-                    TestIP             = if ($service.TestIP) { $service.TestIP.ToString() } else { 'N/A' }
-                    QueryName          = 'N/A'
-                    IsAuthorised       = $false
-                    ResponseType       = 'Error'
-                    ResponseData       = $_.Exception.Message
-                    AdditionalServices = $null
-                })
-            }
-        }
+        Write-Progress -Activity "Testing Services for $currentDomain" -Completed
+        Write-Verbose "Fingerprint scan completed for domain: $currentDomain"
     }
-
-    Write-Progress -Activity "Testing Services" -Completed
-    Write-Verbose "Fingerprint scan completed for domain: $Domain"
 }
 
 end {
