@@ -5,7 +5,7 @@ Converts Microsoft Sentinel Analytics Rules from Excel or CSV to MITRE ATT&CK Na
 .DESCRIPTION
 This script processes an Excel or CSV export of Microsoft Sentinel Analytics Rules and generates
 a MITRE ATT&CK Navigator layer file (v4.5 format) with technique scoring based on rule coverage.
-Updated for MITRE ATT&CK v17.1 compatibility.
+Updated for MITRE ATT&CK v18.0 compatibility.
 
 .PARAMETER InputExcelPath
 Path to the input Excel file containing analytics rules data
@@ -21,9 +21,9 @@ PS> .\Convert-ExcelAnalyticsRulesExtractToAttackNavigatorLayer.ps1 -InputCsvPath
 
 .NOTES
 Author: Daniel Streefkerk
-Version: 2.1.0
-Date: 2 October 2025
-Updated for MITRE ATT&CK v17.1 compatibility
+Version: 2.2.0
+Date: 7 November 2025
+Updated for MITRE ATT&CK v18.0 compatibility
 TODO: Handle sub-techniques
 #>
 
@@ -104,12 +104,12 @@ process {
             }
         }
 
-        # Build layer structure for MITRE ATT&CK v17.1
+        # Build layer structure for MITRE ATT&CK v18.0
         $layer = [ordered]@{
             name = "Microsoft Sentinel Coverage"
             versions = [ordered]@{
-                attack    = "17"
-                navigator = "5.1.0"
+                attack    = "18"
+                navigator = "5.2.0"
                 layer     = "4.5"
             }
             domain = "enterprise-attack"
@@ -118,15 +118,15 @@ process {
             filters = [ordered]@{
                 platforms = @(
                     "Windows",
-                    "Linux", 
+                    "Linux",
                     "macOS",
                     "Network Devices",
                     "ESXi",
                     "PRE",
                     "Containers",
                     "IaaS",
-                    "SaaS",
                     "Office Suite",
+                    "SaaS",
                     "Identity Provider"
                 )
             }

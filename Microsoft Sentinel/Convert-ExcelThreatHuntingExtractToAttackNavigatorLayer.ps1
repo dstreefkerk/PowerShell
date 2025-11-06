@@ -5,7 +5,7 @@ Converts Microsoft Sentinel Threat Hunting Queries from Excel or CSV to MITRE AT
 .DESCRIPTION
 This script processes an Excel or CSV export of Microsoft Sentinel Threat Hunting Queries and generates
 a MITRE ATT&CK Navigator layer file (v4.5 format) with technique scoring based on query coverage.
-Updated for MITRE ATT&CK v17.1 compatibility.
+Updated for MITRE ATT&CK v18.0 compatibility.
 
 .PARAMETER InputExcelPath
 Path to the input Excel file containing hunting queries data
@@ -21,9 +21,9 @@ PS> .\Convert-ExcelThreatHuntingExtractToAttackNavigatorLayer.ps1 -InputCsvPath 
 
 .NOTES
 Author: Daniel Streefkerk
-Version: 1.4
-Date: 2 October 2025
-Updated for MITRE ATT&CK v17.1 framework compatibility
+Version: 1.5
+Date: 7 November 2025
+Updated for MITRE ATT&CK v18.0 framework compatibility
 #>
 
 [CmdletBinding(DefaultParameterSetName = 'Excel')]
@@ -183,18 +183,18 @@ try {
         }
     }
 
-    # Build layer structure for MITRE ATT&CK v17.1
+    # Build layer structure for MITRE ATT&CK v18.0
     $layer = @{
         versions = @{
-            attack    = "17"
-            navigator = "5.1.0"
+            attack    = "18"
+            navigator = "5.2.0"
             layer     = "4.5"
         }
         name        = "Microsoft Sentinel Threat Hunting Coverage"
         domain      = "enterprise-attack"
-        description = "Automatically generated from Sentinel Threat Hunting Queries - MITRE ATT&CK v17.1"
+        description = "Automatically generated from Sentinel Threat Hunting Queries - MITRE ATT&CK v18.0"
         filters     = @{
-            platforms = @("Windows", "Linux", "macOS", "Network Devices", "ESXi", "PRE", "Containers", "IaaS", "SaaS", "Office Suite", "Identity Provider")
+            platforms = @("Windows", "Linux", "macOS", "Network Devices", "ESXi", "PRE", "Containers", "IaaS", "Office Suite", "SaaS", "Identity Provider")
         }
         sorting     = 0
         layout      = @{
@@ -220,6 +220,7 @@ try {
         tacticRowBackground    = "#dddddd"
         selectTechniquesAcrossTactics = $true
         selectSubtechniquesWithParent = $false
+        selectVisibleTechniques = $false
     }
 
     # For each technique, generate hashtable with scores and comments
@@ -242,7 +243,7 @@ try {
     # Export JSON
     $layer | ConvertTo-Json -Depth 10 | Out-File -FilePath $OutputJsonPath -Encoding utf8
 
-    Write-Output "MITRE ATT&CK v17.1 layer file generated at: $OutputJsonPath"
+    Write-Output "MITRE ATT&CK v18.0 layer file generated at: $OutputJsonPath"
     Write-Output "Processed $($techniqueMap.Count) unique techniques from $($queries.Count) hunting queries"
 }
 catch {
