@@ -103,7 +103,7 @@
         - OSINT reconnaissance
 
 .LINK
-    https://www.proofpoint.com/
+    https://github.com/dstreefkerk/PowerShell/blob/master/Infosec-Related/Invoke-ProofpointSPFFingerprint.ps1
 
 .LINK
     https://www.rfc-editor.org/rfc/rfc7208.html
