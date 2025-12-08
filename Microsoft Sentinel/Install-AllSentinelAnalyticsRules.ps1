@@ -125,7 +125,7 @@
     Useful for validating the deployment process before running at full scale.
 
 .LINK
-    TBC
+    https://github.com/dstreefkerk/PowerShell/blob/master/Microsoft%20Sentinel/Install-AllSentinelAnalyticsRules.ps1
 #>
 
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
