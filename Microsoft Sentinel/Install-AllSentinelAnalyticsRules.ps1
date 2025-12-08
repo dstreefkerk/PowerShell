@@ -85,41 +85,41 @@
         - Structured PSCustomObject output for pipeline/CSV export
 
 .EXAMPLE
-    .\Install-AllSentinelAnalyticsRules.ps1 -SubscriptionId "12345678-1234-1234-1234-123456789abc" -ResourceGroupName "rg-sentinel" -WorkspaceName "law-sentinel" -Verbose
+    .\Install-AllSentinelAnalyticsRules.ps1 -SubscriptionId "12345678-1234-1234-1234-123456789abc" -ResourceGroupName "MyResourceGroup" -WorkspaceName "MyWorkspace" -Verbose
 
     Connects to Azure (if needed) and creates all analytics rules from installed Content Hub
     solutions. Existing rules are skipped. Verbose output shows progress details.
 
 .EXAMPLE
-    .\Install-AllSentinelAnalyticsRules.ps1 -SubscriptionId "12345678-1234-1234-1234-123456789abc" -ResourceGroupName "rg-sentinel" -WorkspaceName "law-sentinel" -WhatIf
+    .\Install-AllSentinelAnalyticsRules.ps1 -SubscriptionId "12345678-1234-1234-1234-123456789abc" -ResourceGroupName "MyResourceGroup" -WorkspaceName "MyWorkspace" -WhatIf
 
     Performs a dry run showing which rules would be created without making any changes.
     Useful for planning and validation before actual deployment.
 
 .EXAMPLE
-    .\Install-AllSentinelAnalyticsRules.ps1 -SubscriptionId "12345678-1234-1234-1234-123456789abc" -ResourceGroupName "rg-sentinel" -WorkspaceName "law-sentinel" -LogFile "C:\logs\sentinel-rules.log"
+    .\Install-AllSentinelAnalyticsRules.ps1 -SubscriptionId "12345678-1234-1234-1234-123456789abc" -ResourceGroupName "MyResourceGroup" -WorkspaceName "MyWorkspace" -LogFile "C:\logs\sentinel-rules.log"
 
     Creates rules and writes a timestamped audit log for compliance tracking.
 
 .EXAMPLE
-    .\Install-AllSentinelAnalyticsRules.ps1 -SubscriptionId "12345678-1234-1234-1234-123456789abc" -ResourceGroupName "rg-sentinel" -WorkspaceName "law-sentinel" -excludePreviewDeprecated "No" -enableRules "No"
+    .\Install-AllSentinelAnalyticsRules.ps1 -SubscriptionId "12345678-1234-1234-1234-123456789abc" -ResourceGroupName "MyResourceGroup" -WorkspaceName "MyWorkspace" -excludePreviewDeprecated "No" -enableRules "No"
 
     Creates all rules including Preview and Deprecated ones, but leaves them disabled
     for manual review before activation.
 
 .EXAMPLE
-    .\Install-AllSentinelAnalyticsRules.ps1 -SubscriptionId "12345678-1234-1234-1234-123456789abc" -ResourceGroupName "rg-sentinel" -WorkspaceName "law-sentinel" -excludeRuleTemplates @("Brute force attack against a Cloud PC", "Anomalous sign-in location")
+    .\Install-AllSentinelAnalyticsRules.ps1 -SubscriptionId "12345678-1234-1234-1234-123456789abc" -ResourceGroupName "MyResourceGroup" -WorkspaceName "MyWorkspace" -excludeRuleTemplates @("Brute force attack against a Cloud PC", "Anomalous sign-in location")
 
     Creates all rules except for the specified rule templates by display name.
 
 .EXAMPLE
-    $results = .\Install-AllSentinelAnalyticsRules.ps1 -SubscriptionId "12345678-1234-1234-1234-123456789abc" -ResourceGroupName "rg-sentinel" -WorkspaceName "law-sentinel"
+    $results = .\Install-AllSentinelAnalyticsRules.ps1 -SubscriptionId "12345678-1234-1234-1234-123456789abc" -ResourceGroupName "MyResourceGroup" -WorkspaceName "MyWorkspace"
     $results | Where-Object Status -eq "Created" | Export-Csv -Path "created-rules.csv"
 
     Captures the structured output and exports created rules to CSV for reporting.
 
 .EXAMPLE
-    .\Install-AllSentinelAnalyticsRules.ps1 -SubscriptionId "12345678-1234-1234-1234-123456789abc" -ResourceGroupName "rg-sentinel" -WorkspaceName "law-sentinel" -Limit 5
+    .\Install-AllSentinelAnalyticsRules.ps1 -SubscriptionId "12345678-1234-1234-1234-123456789abc" -ResourceGroupName "MyResourceGroup" -WorkspaceName "MyWorkspace" -Limit 5
 
     Creates only the first 5 rules (that don't already exist) as a test batch.
     Useful for validating the deployment process before running at full scale.
