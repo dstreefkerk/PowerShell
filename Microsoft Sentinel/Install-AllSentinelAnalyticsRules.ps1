@@ -51,6 +51,11 @@
     Optional maximum number of rules to create. Useful for testing with a small batch
     before running a full deployment. Skipped rules do not count toward the limit.
 
+.PARAMETER ChooseAndInstall
+    Enables interactive rule selection mode. Displays all available (uninstalled) rules
+    in an Out-GridView for manual selection, then prompts for confirmation before
+    installing the selected rules.
+
 .INPUTS
     None. This script does not accept pipeline input.
 
@@ -124,6 +129,12 @@
     Creates only the first 5 rules (that don't already exist) as a test batch.
     Useful for validating the deployment process before running at full scale.
 
+.EXAMPLE
+    .\Install-AllSentinelAnalyticsRules.ps1 -SubscriptionId "12345678-1234-1234-1234-123456789abc" -ResourceGroupName "MyResourceGroup" -WorkspaceName "MyWorkspace" -ChooseAndInstall
+
+    Displays all available uninstalled rules in a grid view for interactive selection.
+    After selecting rules, shows a confirmation prompt before installation.
+
 .LINK
     https://github.com/dstreefkerk/PowerShell/blob/master/Microsoft%20Sentinel/Install-AllSentinelAnalyticsRules.ps1
 #>
@@ -151,7 +162,9 @@ param (
     [string]$LogFile,
     [Parameter(Position = 7, Mandatory = $false, HelpMessage = 'Maximum number of rules to create (for testing)')]
     [ValidateRange(1, [int]::MaxValue)]
-    [int]$Limit
+    [int]$Limit,
+    [Parameter(Position = 8, Mandatory = $false, HelpMessage = 'Interactively select rules via Out-GridView before installation')]
+    [switch]$ChooseAndInstall
 )
 
 Set-StrictMode -Version Latest
@@ -338,6 +351,9 @@ Write-Verbose "Using subscription: $subscriptionId"
 
 # Initialize log file if specified
 if ($LogFile) {
+    # Resolve to absolute path to avoid confusion with relative paths
+    $LogFile = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($LogFile)
+
     $logHeader = @"
 === Microsoft Sentinel Analytics Rules Deployment ===
 Timestamp: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
@@ -351,7 +367,7 @@ Limit: $(if ($Limit) { $Limit } else { 'None' })
 
 "@
     $logHeader | Out-File -FilePath $LogFile -Encoding utf8
-    Write-Verbose "Logging to: $LogFile"
+    Write-Host "Logging to: $LogFile" -ForegroundColor DarkCyan
 }
 
 # Define the Preview API Version to use for Microsoft Sentinel
@@ -402,6 +418,137 @@ foreach ($existingRule in $existingRulesResponse) {
 }
 Write-Verbose "Found $($existingRulesResponse.Count) existing alert rules"
 Write-Log -Message "Found $($existingRulesResponse.Count) existing alert rules" -LogFile $LogFile
+
+# ChooseAndInstall mode: collect available rules and let user select
+$selectedRuleTemplates = @{}
+if ($ChooseAndInstall) {
+    Write-Host "`nCollecting available rules for selection..." -ForegroundColor Cyan
+    $availableRules = @()
+
+    foreach ($solution in $allSolutions) {
+        $solutionName = $solution.properties.displayName
+        $solutionContentId = $solution.properties.contentId
+
+        # Get templates for this solution
+        $contentTemplates = @($allContentTemplates | Where-Object {
+            $_.properties.packageId -eq $solutionContentId -and $_.properties.contentKind -eq "AnalyticsRule"
+        })
+
+        if ($contentTemplates.Count -eq 0) {
+            continue
+        }
+
+        # Apply Preview/Deprecated filter
+        if ($excludePreviewDeprecated -eq 'Yes') {
+            $contentTemplates = @($contentTemplates | Where-Object {
+                $_.properties.displayName -notmatch '^(Preview|Deprecated)' -and
+                $_.properties.displayName -notmatch '\[Preview\]' -and
+                $_.properties.displayName -notmatch '\[Deprecated\]'
+            })
+        }
+
+        # Apply excludeRuleTemplates filter
+        if ($excludeRuleTemplates) {
+            foreach ($ruleTemplate in $excludeRuleTemplates) {
+                $contentTemplates = @($contentTemplates | Where-Object { $_.properties.displayname -ne "$ruleTemplate" })
+            }
+        }
+
+        foreach ($contentTemplate in $contentTemplates) {
+            $ruleName = $contentTemplate.name
+
+            # Skip rules that already exist
+            if ($existingRuleIds.ContainsKey($ruleName)) {
+                continue
+            }
+
+            # Refresh token if approaching expiration
+            Update-TokenIfNeeded
+
+            # Fetch full rule template to get severity and other details
+            $ruleTemplateURI = "https://management.azure.com/subscriptions/$subscriptionid/resourceGroups/$resourceGroupName/providers/Microsoft.OperationalInsights/workspaces/$workspaceName/providers/Microsoft.SecurityInsights/contentTemplates/$($ruleName)$($apiVersion)"
+
+            try {
+                $ruleResponse = Invoke-RestMethodWithRetry -Uri $ruleTemplateURI -Method 'GET' -Headers $script:authHeader
+                $rule = $ruleResponse.properties.mainTemplate.resources | Where-Object type -eq 'Microsoft.SecurityInsights/AlertRuleTemplates'
+
+                # Check again by template rule name
+                if ($existingRuleIds.ContainsKey($rule.name)) {
+                    continue
+                }
+
+                $tacticsStr = if ($rule.properties.tactics) { $rule.properties.tactics -join ', ' } else { "" }
+                $techniquesStr = if ($rule.properties.techniques) { $rule.properties.techniques -join ', ' } else { "" }
+                $severityStr = if ($rule.properties.severity) { $rule.properties.severity } else { "" }
+
+                $availableRules += [PSCustomObject]@{
+                    Solution      = $solutionName
+                    RuleName      = $rule.properties.displayName
+                    Severity      = $severityStr
+                    Tactics       = $tacticsStr
+                    Techniques    = $techniquesStr
+                    TemplateName  = $ruleName
+                }
+
+                Write-Verbose "Found available rule: $($rule.properties.displayName)"
+            }
+            catch {
+                Write-Verbose "Failed to fetch template for: $($contentTemplate.properties.displayName) - $($_.Exception.Message)"
+            }
+        }
+    }
+
+    if ($availableRules.Count -eq 0) {
+        Write-Host "`nNo uninstalled rules found. All rules are already installed." -ForegroundColor Yellow
+        Write-Log -Message "ChooseAndInstall: No uninstalled rules found. All rules are already installed." -LogFile $LogFile -Level 'Info'
+        return
+    }
+
+    Write-Host "Found $($availableRules.Count) available rules to choose from." -ForegroundColor Cyan
+    Write-Log -Message "ChooseAndInstall: Found $($availableRules.Count) available (uninstalled) rules." -LogFile $LogFile -Level 'Info'
+
+    # Display in Out-GridView for selection
+    $selectedRules = $availableRules |
+        Select-Object Solution, RuleName, Severity, Tactics, Techniques, TemplateName |
+        Out-GridView -PassThru -Title "Select Analytics Rules to Install (use Ctrl+Click for multiple)"
+
+    if (-not $selectedRules -or @($selectedRules).Count -eq 0) {
+        Write-Host "`nNo rules selected. Exiting." -ForegroundColor Yellow
+        Write-Log -Message "ChooseAndInstall: No rules selected by user. Exiting." -LogFile $LogFile -Level 'Info'
+        return
+    }
+
+    # Ensure we have an array
+    $selectedRules = @($selectedRules)
+
+    # Show selected rules in console
+    Write-Host "`nSelected rules to install:" -ForegroundColor Cyan
+    $selectedRules | Select-Object RuleName, Solution | Format-Table -AutoSize
+
+    # Apply -Limit if specified
+    if ($Limit -and $selectedRules.Count -gt $Limit) {
+        Write-Host "Note: Only the first $Limit rules will be installed (Limit parameter)." -ForegroundColor Yellow
+        $selectedRules = $selectedRules | Select-Object -First $Limit
+        Write-Host "`nRules to install after applying limit:" -ForegroundColor Cyan
+        $selectedRules | Select-Object RuleName, Solution | Format-Table -AutoSize
+    }
+
+    # Prompt for confirmation
+    $confirm = Read-Host "`nInstall $($selectedRules.Count) selected rules? (Y/N)"
+    if ($confirm -notmatch '^[Yy]$') {
+        Write-Host "Installation cancelled." -ForegroundColor Yellow
+        Write-Log -Message "ChooseAndInstall: User cancelled installation of $($selectedRules.Count) selected rules." -LogFile $LogFile -Level 'Warning'
+        return
+    }
+
+    # Build lookup hashtable for selected rules by template name
+    foreach ($selectedRule in $selectedRules) {
+        $selectedRuleTemplates[$selectedRule.TemplateName] = $true
+    }
+
+    Write-Host "`nProceeding with installation of $($selectedRules.Count) rules..." -ForegroundColor Cyan
+    Write-Log -Message "ChooseAndInstall: User selected $($selectedRules.Count) rules for installation" -LogFile $LogFile
+}
 
 # Results tracking
 $results = @()
@@ -480,6 +627,11 @@ try {
                 Tactics    = ""
                 Techniques = ""
             }
+            continue
+        }
+
+        # In ChooseAndInstall mode, skip rules not selected by user
+        if ($ChooseAndInstall -and -not $selectedRuleTemplates.ContainsKey($ruleName)) {
             continue
         }
 
@@ -722,4 +874,4 @@ Total Failed: $totalFailed
 #endregion Main
 
 # Output structured results object for pipeline consumption
-$results | Format-Table -AutoSize
+$results
