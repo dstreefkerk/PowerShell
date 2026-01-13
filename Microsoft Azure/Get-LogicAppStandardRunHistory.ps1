@@ -76,6 +76,16 @@
     Filter to only retrieve specific action names. Accepts an array of action names.
     When specified, only these actions will be included in the results.
     Automatically enables -IncludeActionDetails.
+    Names can be specified with spaces (as shown in the Azure Portal GUI) or with
+    underscores (as used in the backend). Spaces are automatically converted to underscores.
+
+.PARAMETER RequireSucceededActions
+    Only include runs where the specified action(s) exist AND succeeded.
+    Accepts an array of action names. Runs where any of these actions are missing
+    or did not succeed will be excluded from the output.
+    Names can be specified with spaces (as shown in the Azure Portal GUI) or with
+    underscores (as used in the backend). Spaces are automatically converted to underscores.
+    Automatically enables -IncludeActionDetails.
 
 .PARAMETER ListWorkflows
     Lists all workflows in the Logic App Standard without retrieving run history.
@@ -109,9 +119,10 @@
     Returns an array of custom objects with run history details.
 
 .NOTES
-    Version:        2.0.0
-    Author:         Daniel Streefkerk (Original) - Modified for Standard Logic Apps
-    Creation Date:  06 August 2025 (Original) - Modified September 2025
+    Version:        2.0.1
+    Author:         Daniel Streefkerk
+    Creation Date:  06 August 2025
+    Last Modified:  14 January 2026
     Purpose:        Azure Logic App Standard workflow run history extraction
     
     Prerequisites:
@@ -198,6 +209,9 @@ param(
 
     [Parameter()]
     [string[]]$ActionNames,
+
+    [Parameter()]
+    [string[]]$RequireSucceededActions,
 
     [Parameter()]
     [switch]$ListWorkflows,
@@ -403,19 +417,19 @@ function Get-RunActions {
     param(
         [Parameter(Mandatory = $true)]
         [string]$WorkflowName,
-        
+
         [Parameter(Mandatory = $true)]
         [string]$RunId,
-        
+
         [Parameter(Mandatory = $true)]
         [hashtable]$Headers,
-        
+
         [Parameter(Mandatory = $true)]
         [string]$BaseUri,
-        
+
         [Parameter()]
         [switch]$IncludeInputsOutputs,
-        
+
         [Parameter()]
         [string[]]$ActionNames
     )
@@ -424,15 +438,35 @@ function Get-RunActions {
         # Actions endpoint for Standard Logic Apps
         $actionsUri = "$BaseUri/hostruntime/runtime/webhooks/workflow/api/management/workflows/$WorkflowName/runs/$RunId/actions?api-version=2018-11-01"
         Write-Verbose "Fetching actions for run: $RunId"
-        
-        $response = Invoke-RestMethod -Uri $actionsUri -Headers $Headers -Method Get -ErrorAction Stop
-        
-        if (-not $response.value) {
+
+        # Fetch all pages of actions (API paginates at ~30 actions)
+        $allActionData = @()
+        $nextLink = $actionsUri
+        $pageCount = 0
+
+        while ($nextLink) {
+            $pageCount++
+            $response = Invoke-RestMethod -Uri $nextLink -Headers $Headers -Method Get -ErrorAction Stop
+
+            if ($response.value) {
+                $allActionData += $response.value
+            }
+
+            # Check for next page
+            $nextLink = if ($response.PSObject.Properties['nextLink']) { $response.nextLink } else { $null }
+            if ($nextLink) {
+                Write-Verbose "Fetching actions page $($pageCount + 1) for run: $RunId"
+            }
+        }
+
+        if ($allActionData.Count -eq 0) {
             return @()
         }
-        
-        # Use efficient foreach output capture pattern
-        $actions = foreach ($action in $response.value) {
+
+        Write-Verbose "Retrieved $($allActionData.Count) total actions across $pageCount page(s)"
+
+        # Use efficient foreach output capture pattern, wrapped in @() to ensure array even when empty
+        $actions = @(foreach ($action in $allActionData) {
             # Filter by action name if specified
             if ($ActionNames -and $action.name -notin $ActionNames) {
                 Write-Verbose "Skipping action '$($action.name)' - not in filter list"
@@ -462,7 +496,7 @@ function Get-RunActions {
                 # Get the direct inputs/outputs first
                 $inputs = Get-SafeProperty -Object $action -PropertyPath 'properties.inputs'
                 $outputs = Get-SafeProperty -Object $action -PropertyPath 'properties.outputs'
-                
+
                 # Check for content links and override if they exist
                 $inputsLinkUri = Get-SafeProperty -Object $action -PropertyPath 'properties.inputsLink.uri'
                 if ($inputsLinkUri) {
@@ -475,7 +509,7 @@ function Get-RunActions {
                         Write-Verbose "Could not fetch input content: $_"
                     }
                 }
-                
+
                 $outputsLinkUri = Get-SafeProperty -Object $action -PropertyPath 'properties.outputsLink.uri'
                 if ($outputsLinkUri) {
                     try {
@@ -487,7 +521,7 @@ function Get-RunActions {
                         Write-Verbose "Could not fetch output content: $_"
                     }
                 }
-                
+
                 # Add the inputs/outputs to the action object
                 $actionObject | Add-Member -NotePropertyName Inputs -NotePropertyValue $inputs
                 $actionObject | Add-Member -NotePropertyName Outputs -NotePropertyValue $outputs
@@ -495,10 +529,10 @@ function Get-RunActions {
             
             # Output the action object
             $actionObject
-        }
-        
+        })
+
         if ($ActionNames) {
-            Write-Verbose "Filtered to $($actions.Count) actions matching: $($ActionNames -join ', ')"
+            Write-Verbose "Found $($actions.Count) of $($ActionNames.Count) requested actions: $($ActionNames -join ', ')"
         }
         
         return $actions
@@ -690,6 +724,16 @@ try {
         $MaxResults = 1
         Write-Verbose "MostRecent specified - limiting to 1 result"
     }
+
+    # Normalize action names: convert spaces to underscores (GUI format to backend format)
+    if ($ActionNames) {
+        $ActionNames = $ActionNames | ForEach-Object { $_ -replace ' ', '_' }
+        Write-Verbose "Normalized ActionNames filter: $($ActionNames -join ', ')"
+    }
+    if ($RequireSucceededActions) {
+        $RequireSucceededActions = $RequireSucceededActions | ForEach-Object { $_ -replace ' ', '_' }
+        Write-Verbose "Normalized RequireSucceededActions filter: $($RequireSucceededActions -join ', ')"
+    }
     
     # Retrieve runs
     Write-Information "Retrieving runs for workflow: $WorkflowName" -InformationAction Continue
@@ -708,9 +752,9 @@ try {
             return @()
         }
         
-        # Process runs into objects using efficient foreach pattern
+        # Process runs into objects using efficient foreach pattern, wrapped in @() to ensure array even when empty
         Write-Verbose "Processing run data"
-        $processedRuns = foreach ($run in $allRuns) {
+        $processedRuns = @(foreach ($run in $allRuns) {
             # Filter by EndTime if specified (API doesn't support this)
             if ($EndTime) {
                 $runStartTime = if ($run.properties.startTime) { 
@@ -747,11 +791,45 @@ try {
                 Correlation  = Get-SafeProperty -Object $run -PropertyPath 'properties.correlation'
             }
             
-            # Get action details if requested or if specific actions are requested
-            if ($IncludeActionDetails -or $ActionNames) {
+            # Get action details if requested, specific actions requested, or need to check required succeeded actions
+            if ($IncludeActionDetails -or $ActionNames -or $RequireSucceededActions) {
                 Write-Verbose "Fetching action details for run: $($run.name)"
-                $actions = Get-RunActions -WorkflowName $WorkflowName -RunId $run.name -Headers $headers -BaseUri $baseUri -IncludeInputsOutputs:$IncludeInputsOutputs -ActionNames $ActionNames
-                
+
+                # Calculate which actions to fetch - union of ActionNames and RequireSucceededActions (only fetch what we need)
+                $actionNamesToFetch = if ($ActionNames -or $RequireSucceededActions) {
+                    @(($ActionNames + $RequireSucceededActions) | Where-Object { $_ } | Select-Object -Unique)
+                } else {
+                    $null  # Fetch all if just -IncludeActionDetails
+                }
+
+                $allActions = Get-RunActions -WorkflowName $WorkflowName -RunId $run.name -Headers $headers -BaseUri $baseUri -IncludeInputsOutputs:$IncludeInputsOutputs -ActionNames $actionNamesToFetch
+
+                # Check RequireSucceededActions filter - skip run if required actions don't exist or didn't succeed
+                if ($RequireSucceededActions) {
+                    $missingOrFailed = @()
+                    foreach ($requiredAction in $RequireSucceededActions) {
+                        $matchedAction = $allActions | Where-Object { $_.Name -eq $requiredAction }
+                        if (-not $matchedAction) {
+                            $missingOrFailed += "$requiredAction (missing)"
+                        }
+                        elseif ($matchedAction.Status -ne 'Succeeded') {
+                            $missingOrFailed += "$requiredAction (status: $($matchedAction.Status))"
+                        }
+                    }
+
+                    if ($missingOrFailed.Count -gt 0) {
+                        Write-Verbose "Skipping run $($run.name) - required actions not succeeded: $($missingOrFailed -join ', ')"
+                        continue
+                    }
+                }
+
+                # Apply ActionNames filter for display if specified
+                $actions = if ($ActionNames) {
+                    @($allActions | Where-Object { $_.Name -in $ActionNames })
+                } else {
+                    $allActions
+                }
+
                 if ($actions) {
                     $runObject | Add-Member -NotePropertyName Actions -NotePropertyValue $actions
                     $runObject | Add-Member -NotePropertyName ActionCount -NotePropertyValue $actions.Count
@@ -796,8 +874,8 @@ try {
             
             # Output the run object
             $runObject
-        }
-        
+        })
+
         Write-Information "Processed $($processedRuns.Count) runs" -InformationAction Continue
         
         # Generate summary
