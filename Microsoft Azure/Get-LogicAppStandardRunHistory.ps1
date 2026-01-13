@@ -530,7 +530,7 @@ function Get-TriggerHistory {
     
     try {
         # Trigger history endpoint for Standard Logic Apps
-        $triggerHistoryUri = "$BaseUri/hostruntime/runtime/webhooks/workflow/api/management/workflows/$WorkflowName/triggers/$TriggerName/histories/$RunId?api-version=2018-11-01"
+        $triggerHistoryUri = "$BaseUri/hostruntime/runtime/webhooks/workflow/api/management/workflows/$WorkflowName/triggers/$TriggerName/histories/${RunId}?api-version=2018-11-01"
         Write-Verbose "Fetching trigger history for run: $RunId"
         
         $response = Invoke-RestMethod -Uri $triggerHistoryUri -Headers $Headers -Method Get -ErrorAction Stop
