@@ -756,35 +756,36 @@ try {
         Write-Verbose "Processing run data"
         $processedRuns = @(foreach ($run in $allRuns) {
             # Filter by EndTime if specified (API doesn't support this)
+            # Note: API returns UTC times, but EndTime parameter is in local time
             if ($EndTime) {
-                $runStartTime = if ($run.properties.startTime) { 
-                    try { [DateTime]$run.properties.startTime } catch { $null }
+                $runStartTime = if ($run.properties.startTime) {
+                    try { ([DateTime]$run.properties.startTime).ToLocalTime() } catch { $null }
                 } else { $null }
-                
+
                 if ($runStartTime -and $runStartTime -gt $EndTime) {
                     continue
                 }
             }
             
             # Create output object
-            $startTime = Get-SafeProperty -Object $run -PropertyPath 'properties.startTime'
-            $endTime = Get-SafeProperty -Object $run -PropertyPath 'properties.endTime'
-            
+            $runStartTimeRaw = Get-SafeProperty -Object $run -PropertyPath 'properties.startTime'
+            $runEndTimeRaw = Get-SafeProperty -Object $run -PropertyPath 'properties.endTime'
+
             # Calculate duration if both times exist
-            $duration = if ($startTime -and $endTime) {
-                try { ([DateTime]$endTime - [DateTime]$startTime).TotalSeconds } catch { $null }
+            $duration = if ($runStartTimeRaw -and $runEndTimeRaw) {
+                try { ([DateTime]$runEndTimeRaw - [DateTime]$runStartTimeRaw).TotalSeconds } catch { $null }
             } else { $null }
-            
+
             $runObject = [PSCustomObject]@{
                 RunId        = $run.name
                 WorkflowName = $WorkflowName
                 Status       = Get-SafeProperty -Object $run -PropertyPath 'properties.status'
-                StartTime    = $startTime ? [DateTime]$startTime : $null
-                EndTime      = $endTime ? [DateTime]$endTime : $null
+                StartTime    = $runStartTimeRaw ? ([DateTime]$runStartTimeRaw).ToLocalTime() : $null
+                EndTime      = $runEndTimeRaw ? ([DateTime]$runEndTimeRaw).ToLocalTime() : $null
                 Duration     = $duration
                 TriggerName  = Get-SafeProperty -Object $run -PropertyPath 'properties.trigger.name'
-                TriggerTime  = if ($triggerTime = Get-SafeProperty -Object $run -PropertyPath 'properties.trigger.startTime') { 
-                    try { [DateTime]$triggerTime } catch { $null } 
+                TriggerTime  = if ($triggerTime = Get-SafeProperty -Object $run -PropertyPath 'properties.trigger.startTime') {
+                    try { ([DateTime]$triggerTime).ToLocalTime() } catch { $null }
                 } else { $null }
                 ErrorCode    = Get-SafeProperty -Object $run -PropertyPath 'properties.error.code'
                 ErrorMessage = Get-SafeProperty -Object $run -PropertyPath 'properties.error.message'
