@@ -341,30 +341,38 @@ function Get-WorkflowRuns {
         
         [Parameter()]
         [DateTime]$StartTime,
-        
+
+        [Parameter()]
+        [DateTime]$EndTime,
+
         [Parameter()]
         [uint32]$MaxResults = 1000
     )
-    
+
     try {
         # Build the runs endpoint for Standard Logic Apps
         # Using the hostruntime API endpoint
         $runsUri = "$BaseUri/hostruntime/runtime/webhooks/workflow/api/management/workflows/$WorkflowName/runs?api-version=2018-11-01&`$top=50"
-        
-        # Add filter for status if specified
+
+        # Build OData filter components
+        $filterParts = @()
+
         if ($Status) {
-            $runsUri += "&`$filter=status eq '$Status'"
+            $filterParts += "status eq '$Status'"
         }
-        
-        # Add date filter
+
         if ($StartTime) {
             $startTimeUtc = $StartTime.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
-            if ($Status) {
-                $runsUri += " and startTime ge $startTimeUtc"
-            }
-            else {
-                $runsUri += "&`$filter=startTime ge $startTimeUtc"
-            }
+            $filterParts += "startTime ge $startTimeUtc"
+        }
+
+        if ($EndTime) {
+            $endTimeUtc = $EndTime.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
+            $filterParts += "startTime le $endTimeUtc"
+        }
+
+        if ($filterParts.Count -gt 0) {
+            $runsUri += "&`$filter=" + ($filterParts -join ' and ')
         }
         
         Write-Verbose "Fetching runs from: $runsUri"
@@ -739,7 +747,7 @@ try {
     Write-Information "Retrieving runs for workflow: $WorkflowName" -InformationAction Continue
     
     if ($PSCmdlet.ShouldProcess("Azure Management API", "Query Logic App Standard workflow runs")) {
-        $allRuns = Get-WorkflowRuns -WorkflowName $WorkflowName -Headers $headers -BaseUri $baseUri -Status $Status -StartTime $StartTime -MaxResults $MaxResults
+        $allRuns = Get-WorkflowRuns -WorkflowName $WorkflowName -Headers $headers -BaseUri $baseUri -Status $Status -StartTime $StartTime -EndTime $EndTime -MaxResults $MaxResults
         
         Write-Information "Retrieved $($allRuns.Count) runs" -InformationAction Continue
         
@@ -755,7 +763,7 @@ try {
         # Process runs into objects using efficient foreach pattern, wrapped in @() to ensure array even when empty
         Write-Verbose "Processing run data"
         $processedRuns = @(foreach ($run in $allRuns) {
-            # Filter by EndTime if specified (API doesn't support this)
+            # Secondary EndTime filter (API also filters, but this ensures edge cases are handled)
             # Note: API returns UTC times, but EndTime parameter is in local time
             if ($EndTime) {
                 $runStartTime = if ($run.properties.startTime) {
