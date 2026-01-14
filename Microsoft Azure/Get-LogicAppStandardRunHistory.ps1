@@ -91,8 +91,12 @@
     Lists all workflows in the Logic App Standard without retrieving run history.
 
 .PARAMETER NonInteractive
-    Run in non-interactive mode. When multiple workflows are available and no WorkflowName 
+    Run in non-interactive mode. When multiple workflows are available and no WorkflowName
     is specified, the script will fail instead of prompting for selection.
+
+.PARAMETER UseUtc
+    Interpret StartTime and EndTime parameters as UTC and display all output times in UTC.
+    When not specified, times are interpreted and displayed in local time.
 
 .EXAMPLE
     .\Get-LogicAppStandardRunHistory.ps1 -ResourceGroupName "MyRG" -LogicAppStandardName "MyLogicAppStandard" -ListWorkflows
@@ -217,7 +221,10 @@ param(
     [switch]$ListWorkflows,
 
     [Parameter()]
-    [switch]$NonInteractive
+    [switch]$NonInteractive,
+
+    [Parameter()]
+    [switch]$UseUtc
 )
 
 #region Functions
@@ -346,6 +353,9 @@ function Get-WorkflowRuns {
         [DateTime]$EndTime,
 
         [Parameter()]
+        [switch]$UseUtc,
+
+        [Parameter()]
         [uint32]$MaxResults = 1000
     )
 
@@ -362,12 +372,21 @@ function Get-WorkflowRuns {
         }
 
         if ($StartTime) {
-            $startTimeUtc = $StartTime.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
+            # If UseUtc, times are already UTC; otherwise convert from local
+            $startTimeUtc = if ($UseUtc) {
+                $StartTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
+            } else {
+                $StartTime.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
+            }
             $filterParts += "startTime ge $startTimeUtc"
         }
 
         if ($EndTime) {
-            $endTimeUtc = $EndTime.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
+            $endTimeUtc = if ($UseUtc) {
+                $EndTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
+            } else {
+                $EndTime.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
+            }
             $filterParts += "startTime le $endTimeUtc"
         }
 
@@ -747,7 +766,7 @@ try {
     Write-Information "Retrieving runs for workflow: $WorkflowName" -InformationAction Continue
     
     if ($PSCmdlet.ShouldProcess("Azure Management API", "Query Logic App Standard workflow runs")) {
-        $allRuns = Get-WorkflowRuns -WorkflowName $WorkflowName -Headers $headers -BaseUri $baseUri -Status $Status -StartTime $StartTime -EndTime $EndTime -MaxResults $MaxResults
+        $allRuns = Get-WorkflowRuns -WorkflowName $WorkflowName -Headers $headers -BaseUri $baseUri -Status $Status -StartTime $StartTime -EndTime $EndTime -UseUtc:$UseUtc -MaxResults $MaxResults
         
         Write-Information "Retrieved $($allRuns.Count) runs" -InformationAction Continue
         
@@ -764,17 +783,19 @@ try {
         Write-Verbose "Processing run data"
         $processedRuns = @(foreach ($run in $allRuns) {
             # Secondary EndTime filter (API also filters, but this ensures edge cases are handled)
-            # Note: API returns UTC times, but EndTime parameter is in local time
             if ($EndTime) {
                 $runStartTime = if ($run.properties.startTime) {
-                    try { ([DateTime]$run.properties.startTime).ToLocalTime() } catch { $null }
+                    try {
+                        $parsed = [DateTime]$run.properties.startTime
+                        if ($UseUtc) { $parsed } else { $parsed.ToLocalTime() }
+                    } catch { $null }
                 } else { $null }
 
                 if ($runStartTime -and $runStartTime -gt $EndTime) {
                     continue
                 }
             }
-            
+
             # Create output object
             $runStartTimeRaw = Get-SafeProperty -Object $run -PropertyPath 'properties.startTime'
             $runEndTimeRaw = Get-SafeProperty -Object $run -PropertyPath 'properties.endTime'
@@ -784,16 +805,30 @@ try {
                 try { ([DateTime]$runEndTimeRaw - [DateTime]$runStartTimeRaw).TotalSeconds } catch { $null }
             } else { $null }
 
+            # Convert times to local unless UseUtc is specified
+            $displayStartTime = if ($runStartTimeRaw) {
+                $parsed = [DateTime]$runStartTimeRaw
+                if ($UseUtc) { $parsed } else { $parsed.ToLocalTime() }
+            } else { $null }
+
+            $displayEndTime = if ($runEndTimeRaw) {
+                $parsed = [DateTime]$runEndTimeRaw
+                if ($UseUtc) { $parsed } else { $parsed.ToLocalTime() }
+            } else { $null }
+
             $runObject = [PSCustomObject]@{
                 RunId        = $run.name
                 WorkflowName = $WorkflowName
                 Status       = Get-SafeProperty -Object $run -PropertyPath 'properties.status'
-                StartTime    = $runStartTimeRaw ? ([DateTime]$runStartTimeRaw).ToLocalTime() : $null
-                EndTime      = $runEndTimeRaw ? ([DateTime]$runEndTimeRaw).ToLocalTime() : $null
+                StartTime    = $displayStartTime
+                EndTime      = $displayEndTime
                 Duration     = $duration
                 TriggerName  = Get-SafeProperty -Object $run -PropertyPath 'properties.trigger.name'
                 TriggerTime  = if ($triggerTime = Get-SafeProperty -Object $run -PropertyPath 'properties.trigger.startTime') {
-                    try { ([DateTime]$triggerTime).ToLocalTime() } catch { $null }
+                    try {
+                        $parsed = [DateTime]$triggerTime
+                        if ($UseUtc) { $parsed } else { $parsed.ToLocalTime() }
+                    } catch { $null }
                 } else { $null }
                 ErrorCode    = Get-SafeProperty -Object $run -PropertyPath 'properties.error.code'
                 ErrorMessage = Get-SafeProperty -Object $run -PropertyPath 'properties.error.message'
