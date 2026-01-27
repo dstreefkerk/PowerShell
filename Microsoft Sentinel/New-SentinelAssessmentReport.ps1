@@ -486,7 +486,7 @@ function Get-SentinelAnalyticsRules {
         $uri = if ($response.PSObject.Properties['nextLink']) { $response.nextLink } else { $null }
     } while ($uri)
 
-    return $allRules
+    return ,$allRules
 }
 
 function Get-SentinelAlertRuleTemplates {
@@ -511,7 +511,7 @@ function Get-SentinelAlertRuleTemplates {
         $uri = if ($response.PSObject.Properties['nextLink']) { $response.nextLink } else { $null }
     } while ($uri)
 
-    return $allTemplates
+    return ,$allTemplates
 }
 
 function Get-SentinelDataConnectors {
@@ -536,7 +536,7 @@ function Get-SentinelDataConnectors {
         $uri = if ($response.PSObject.Properties['nextLink']) { $response.nextLink } else { $null }
     } while ($uri)
 
-    return $allConnectors
+    return ,$allConnectors
 }
 
 function Get-SentinelContentTemplates {
@@ -561,7 +561,7 @@ function Get-SentinelContentTemplates {
         $uri = if ($response.PSObject.Properties['nextLink']) { $response.nextLink } else { $null }
     } while ($uri)
 
-    return $allTemplates
+    return ,$allTemplates
 }
 
 function Get-SentinelContentPackages {
@@ -586,7 +586,7 @@ function Get-SentinelContentPackages {
         $uri = if ($response.PSObject.Properties['nextLink']) { $response.nextLink } else { $null }
     } while ($uri)
 
-    return $allPackages
+    return ,$allPackages
 }
 
 function Get-SentinelSourceControls {
@@ -610,7 +610,7 @@ function Get-SentinelSourceControls {
         $uri = if ($response.PSObject.Properties['nextLink']) { $response.nextLink } else { $null }
     } while ($uri)
 
-    return $allSourceControls
+    return ,$allSourceControls
 }
 
 function Get-SentinelWorkspaceManagerConfig {
@@ -626,7 +626,7 @@ function Get-SentinelWorkspaceManagerConfig {
     $uri = "$BaseUri/workspaceManagerConfigurations?api-version=2024-01-01-preview"
     try {
         $response = Invoke-RestMethodWithRetry -Uri $uri -Method 'GET' -Headers $Headers
-        if ($response.value -and $response.value.Count -gt 0) {
+        if ($response.value -and @($response.value).Count -gt 0) {
             return $response.value[0]  # Return the default configuration
         }
         return $null
@@ -662,7 +662,7 @@ function Get-SentinelWorkspaceManagerMembers {
         # Silently handle - workspace manager may not be enabled
     }
 
-    return $allMembers
+    return ,$allMembers
 }
 
 function Get-SentinelAutomationRules {
@@ -687,7 +687,7 @@ function Get-SentinelAutomationRules {
         $uri = if ($response.PSObject.Properties['nextLink']) { $response.nextLink } else { $null }
     } while ($uri)
 
-    return $allRules
+    return ,$allRules
 }
 
 function Get-SentinelWatchlists {
@@ -712,7 +712,7 @@ function Get-SentinelWatchlists {
         $uri = if ($response.PSObject.Properties['nextLink']) { $response.nextLink } else { $null }
     } while ($uri)
 
-    return $allWatchlists
+    return ,$allWatchlists
 }
 
 function Get-SentinelWorkbooks {
@@ -744,7 +744,7 @@ function Get-SentinelWorkbooks {
         Write-Verbose "Could not retrieve workbooks: $_"
     }
 
-    return $allWorkbooks
+    return ,$allWorkbooks
 }
 
 function Get-SentinelSettings {
@@ -762,11 +762,11 @@ function Get-SentinelSettings {
 
     try {
         $response = Invoke-RestMethodWithRetry -Uri $uri -Method 'GET' -Headers $Headers
-        return $response.value
+        return ,@($response.value)
     }
     catch {
         Write-Warning "Could not retrieve Sentinel settings: $_"
-        return @()
+        return ,@()
     }
 }
 
@@ -821,7 +821,7 @@ function Get-TableRetention {
         Write-Warning "Could not retrieve table retention settings: $_"
     }
 
-    return $allTables
+    return ,$allTables
 }
 
 function Format-Plural {
@@ -902,9 +902,9 @@ function Invoke-SentinelKqlQuery {
         $queryResult = Invoke-AzOperationalInsightsQuery -WorkspaceId $WorkspaceId -Query $Query -ErrorAction Stop
 
         if ($queryResult.Results) {
-            return $queryResult.Results
+            return ,@($queryResult.Results)
         }
-        return @()
+        return $null
     }
     catch {
         Write-Verbose "KQL query failed: $_"
@@ -938,7 +938,7 @@ function Get-DataCollectionEndpoints {
         Write-Verbose "Could not retrieve Data Collection Endpoints: $_"
     }
 
-    return $allDces
+    return ,$allDces
 }
 
 function Get-DataCollectionRules {
@@ -967,7 +967,7 @@ function Get-DataCollectionRules {
         Write-Verbose "Could not retrieve Data Collection Rules: $_"
     }
 
-    return $allDcrs
+    return ,$allDcrs
 }
 
 #endregion Data Collection Functions
@@ -989,11 +989,11 @@ function Invoke-AllHealthChecks {
     # UEBA uses kind='Ueba' with dataSources array, EntityAnalytics is for entity provider sync (AD/AAD)
     $uebaSetting = $CollectedData.Settings | Where-Object { $_.kind -eq 'Ueba' }
     $uebaDataSources = if ($uebaSetting) { Get-SafeProperty $uebaSetting.properties 'dataSources' } else { $null }
-    $uebaEnabled = $uebaDataSources -and $uebaDataSources.Count -gt 0
+    $uebaEnabled = $uebaDataSources -and @($uebaDataSources).Count -gt 0
 
     $entityAnalyticsSetting = $CollectedData.Settings | Where-Object { $_.kind -eq 'EntityAnalytics' }
     $entityProviders = if ($entityAnalyticsSetting) { Get-SafeProperty $entityAnalyticsSetting.properties 'entityProviders' } else { $null }
-    $entityAnalyticsEnabled = $entityProviders -and $entityProviders.Count -gt 0
+    $entityAnalyticsEnabled = $entityProviders -and @($entityProviders).Count -gt 0
 
     $checks += [PSCustomObject]@{
         CheckId     = 'CFG-001'
@@ -1002,7 +1002,7 @@ function Invoke-AllHealthChecks {
         Status      = if ($uebaEnabled) { 'Pass' } else { 'Warning' }
         Severity    = 'Warning'
         Description = if ($uebaEnabled) {
-            "User and Entity Behavior Analytics is enabled with $(Format-Plural $uebaDataSources.Count 'data source'): $($uebaDataSources -join ', ')."
+            "User and Entity Behavior Analytics is enabled with $(Format-Plural @($uebaDataSources).Count 'data source'): $($uebaDataSources -join ', ')."
         } else {
             'UEBA is not enabled. Consider enabling for advanced threat detection.'
         }
@@ -1647,7 +1647,7 @@ function Invoke-AllHealthChecks {
         }
     }
 
-    return $checks
+    return ,$checks
 }
 
 function Get-ConnectorsWithUpdates {
@@ -1723,7 +1723,7 @@ function Get-ConnectorsWithUpdates {
         }
     }
 
-    return $connectorsWithUpdates
+    return ,$connectorsWithUpdates
 }
 
 function Get-RulesWithUpdates {
@@ -1785,7 +1785,7 @@ function Get-RulesWithUpdates {
         }
     }
 
-    return $rulesWithUpdates
+    return ,$rulesWithUpdates
 }
 
 function Get-VisibilityGaps {
@@ -1854,7 +1854,7 @@ function Get-VisibilityGaps {
         }
     }
 
-    return $visibilityGaps
+    return ,$visibilityGaps
 }
 
 #endregion Health Check Functions
@@ -1871,7 +1871,7 @@ function Get-ActiveAnalyticsRules {
         [array]$Rules
     )
 
-    return @($Rules | Where-Object {
+    return ,@($Rules | Where-Object {
         $props = Get-SafeProperty $_ 'properties'
         if (-not $props) { return $false }
 
