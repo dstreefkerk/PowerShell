@@ -1442,8 +1442,9 @@ function Invoke-AllHealthChecks {
 
     # AUT-002: No Playbooks
     $playbookActions = @($CollectedData.AutomationRules | ForEach-Object {
-        $actions = Get-SafeProperty $_.properties 'actions'
-        $actions | Where-Object { $_.actionType -eq 'RunPlaybook' }
+        $props = Get-SafeProperty $_ 'properties'
+        $actions = Get-SafeProperty $props 'actions'
+        if ($actions) { $actions | Where-Object { $_.actionType -eq 'RunPlaybook' } }
     })
     $checks += [PSCustomObject]@{
         CheckId     = 'AUT-002'
@@ -5059,14 +5060,14 @@ catch { Write-Warning "    Failed to fetch workspace manager config: $_" }
 
 Write-Host "  Fetching automation rules..." -ForegroundColor DarkGray
 try {
-    $collectedData.AutomationRules = Get-SentinelAutomationRules -BaseUri $sentinelBaseUri -Headers $authHeader -ApiVersion $sentinelApiVersion
+    $collectedData.AutomationRules = @(Get-SentinelAutomationRules -BaseUri $sentinelBaseUri -Headers $authHeader -ApiVersion $sentinelApiVersion)
     Write-Host "    Retrieved $($collectedData.AutomationRules.Count) automation rules" -ForegroundColor Green
 }
 catch { Write-Warning "    Failed to fetch automation rules: $_" }
 
 Write-Host "  Fetching watchlists..." -ForegroundColor DarkGray
 try {
-    $collectedData.Watchlists = Get-SentinelWatchlists -BaseUri $sentinelBaseUri -Headers $authHeader -ApiVersion $sentinelApiVersion
+    $collectedData.Watchlists = @(Get-SentinelWatchlists -BaseUri $sentinelBaseUri -Headers $authHeader -ApiVersion $sentinelApiVersion)
     Write-Host "    Retrieved $($collectedData.Watchlists.Count) watchlists" -ForegroundColor Green
 }
 catch { Write-Warning "    Failed to fetch watchlists: $_" }
