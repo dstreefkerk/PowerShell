@@ -1241,6 +1241,21 @@ function Invoke-AllHealthChecks {
         Details     = $disabledNrt | ForEach-Object { Get-SafeProperty $_.properties 'displayName' }
     }
 
+    # ANA-007: High Incident Volume
+    if ($CollectedData.IncidentVolumeByRule) {
+        $highVolumeThreshold = 10
+        $highVolumeRules = @($CollectedData.IncidentVolumeByRule | Where-Object { $_.DailyAverage -gt $highVolumeThreshold })
+        $checks += [PSCustomObject]@{
+            CheckId     = 'ANA-007'
+            CheckName   = 'High Incident Volume'
+            Category    = 'Analytics Rules'
+            Status      = if ($highVolumeRules.Count -eq 0) { 'Pass' } else { 'Warning' }
+            Severity    = 'Warning'
+            Description = if ($highVolumeRules.Count -eq 0) { "No rules averaging more than $highVolumeThreshold incidents/day over 30 days." } else { "$(Format-Plural $highVolumeRules.Count 'rule') averaging more than $highVolumeThreshold incidents/day. Review for tuning opportunities." }
+            Details     = $highVolumeRules | ForEach-Object { "$($_.RuleName) ($($_.DailyAverage)/day)" }
+        }
+    }
+
     # Analytics Health checks (from _SentinelHealth table, if available)
     if ($CollectedData.AnalyticsHealthSummary) {
         $healthSummary = @($CollectedData.AnalyticsHealthSummary)
@@ -2581,6 +2596,38 @@ function ConvertTo-ReportHtml {
             $customRulesHtml += "<tr><td>$([System.Web.HttpUtility]::HtmlEncode($displayName))</td><td>$sevBadge</td><td>$($rule.kind)</td><td>$enabledBadge</td></tr>"
         }
         $customRulesHtml += "</tbody></table>"
+    }
+
+    # Build Incident Volume by Rule table (from KQL query data)
+    $incidentVolumeHtml = ""
+    if ($Data.IncidentVolumeByRule -and @($Data.IncidentVolumeByRule).Count -gt 0) {
+        $incidentVolumeRules = @($Data.IncidentVolumeByRule)
+        $incidentVolumeHtml = @"
+<hr class="my-4">
+<h5 class="mt-4 mb-3" id="incident-volume"><span class="badge bg-warning text-dark me-2">$($incidentVolumeRules.Count)</span> Incident Volume by Rule (30 Days)</h5>
+<p class="text-muted small">Rules generating the most incidents over the last 30 days. High-volume rules may indicate tuning opportunities for false positive reduction.</p>
+<table class="table table-hover table-sm report-table" id="incidentVolumeTable">
+<thead><tr><th>Rule Name</th><th>Status</th><th>Severity</th><th>Incidents (30d)</th><th>Daily Avg</th><th>Weekly Avg</th></tr></thead>
+<tbody>
+"@
+        foreach ($rule in ($incidentVolumeRules | Sort-Object { -[double]$_.DailyAverage })) {
+            $ruleName = if ($rule.RuleName) { [System.Web.HttpUtility]::HtmlEncode($rule.RuleName) } else { '-' }
+            $statusBadge = switch ($rule.RuleStatus) {
+                'Active'   { '<span class="badge bg-success">Active</span>' }
+                'Disabled' { '<span class="badge bg-danger">Disabled</span>' }
+                'Deleted'  { '<span class="badge bg-secondary">Deleted</span>' }
+                default    { '<span class="badge bg-secondary">Unknown</span>' }
+            }
+            $sevBadge = switch ($rule.Severity) {
+                'High'          { '<span class="badge bg-danger">High</span>' }
+                'Medium'        { '<span class="badge bg-warning text-dark">Medium</span>' }
+                'Low'           { '<span class="badge bg-info">Low</span>' }
+                'Informational' { '<span class="badge bg-secondary">Info</span>' }
+                default         { '<span class="badge bg-secondary">-</span>' }
+            }
+            $incidentVolumeHtml += "<tr><td>$ruleName</td><td>$statusBadge</td><td>$sevBadge</td><td>$($rule.IncidentCount)</td><td>$($rule.DailyAverage)</td><td>$($rule.WeeklyAverage)</td></tr>"
+        }
+        $incidentVolumeHtml += "</tbody></table>"
     }
 
     # Build Rules with Updates table (from health check ANA-001)
@@ -4072,6 +4119,7 @@ function ConvertTo-ReportHtml {
 <li class='ms-3'><a class='nav-link py-1 small' href='#rules-updates'>Pending Updates</a></li>
 <li class='ms-3'><a class='nav-link py-1 small' href='#disabled-rules'>Disabled Rules</a></li>
 <li class='ms-3'><a class='nav-link py-1 small' href='#custom-rules'>Custom Rules</a></li>
+<li class='ms-3'><a class='nav-link py-1 small' href='#incident-volume'>Incident Volume</a></li>
 <li class='ms-3'><a class='nav-link py-1 small' href='#analytics-health'>Analytics Health</a></li>
 <li><a class='nav-link py-1' href='#data-collection'>Data Collection</a></li>
 <li class='ms-3'><a class='nav-link py-1 small' href='#data-connectors'>Data Connectors</a></li>
@@ -4203,6 +4251,7 @@ function ConvertTo-ReportHtml {
             $rulesWithUpdatesHtml
             $disabledRulesHtml
             $customRulesHtml
+            $incidentVolumeHtml
             $analyticsHealthHtml
           </div>
         </div>
@@ -4995,6 +5044,7 @@ $collectedData = @{
     AnalyticsSkippedWindows  = $null
     AnalyticsExecutionDelays = $null
     AnalyticsAutoDisabled    = $null
+    IncidentVolumeByRule     = $null
     # Agent Health (from Heartbeat and Operation tables)
     AgentHealthSummary       = $null
     AgentOperationErrors     = $null
@@ -5333,6 +5383,53 @@ _SentinelHealth()
             $collectedData.AnalyticsAutoDisabled = Invoke-SentinelKqlQuery -WorkspaceId $workspaceId -Query $analyticsAutoDisabledQuery
             if ($collectedData.AnalyticsAutoDisabled -and @($collectedData.AnalyticsAutoDisabled).Count -gt 0) {
                 Write-Host "      Auto-disabled rules: $(@($collectedData.AnalyticsAutoDisabled).Count) rules" -ForegroundColor Yellow
+            }
+
+            # Query 6: Incident Volume by Rule (from SecurityIncident + SecurityAlert + _SentinelAudit)
+            $incidentVolumeQuery = @"
+let LookbackDays = 30;
+let LookbackPeriod = ago(LookbackDays * 1d);
+let RuleAuditStatus = _SentinelAudit()
+    | where SentinelResourceType == "Analytic Rule"
+    | extend Props = todynamic(ExtendedProperties)
+    | extend UpdatedState = parse_json(tostring(Props.UpdatedResourceState))
+    | extend Enabled = tobool(UpdatedState.properties.enabled)
+    | extend IsDelete = OperationName has "Delete"
+    | summarize arg_max(TimeGenerated, OperationName, Enabled, IsDelete) by SentinelResourceName
+    | extend RuleStatus = case(
+        IsDelete, "Deleted",
+        Enabled == false, "Disabled",
+        Enabled == true, "Active",
+        "Unknown")
+    | project RuleName = SentinelResourceName, RuleStatus;
+let rules = SecurityAlert
+    | where TimeGenerated > ago(365d)
+    | where ProviderName in ("ASI Scheduled Alerts", "ASI NRT Alerts")
+    | where AlertSeverity in ("Medium", "High")
+    | extend ExtendedProperties = todynamic(ExtendedProperties)
+    | extend RuleName = tostring(ExtendedProperties["Analytic Rule Name"])
+    | mv-expand ExtendedProperties["Analytic Rule Ids"] to typeof(string)
+    | extend RelatedAnalyticRuleIds = tostring(todynamic(['ExtendedProperties_Analytic Rule Ids'])[0])
+    | summarize LastAlert = arg_max(TimeGenerated, RuleName, AlertSeverity) by RelatedAnalyticRuleIds;
+SecurityIncident
+| where TimeGenerated > LookbackPeriod
+| where Severity in ("Medium", "High")
+| where AdditionalData.alertProductNames has "Azure Sentinel"
+| where isnotempty(RelatedAnalyticRuleIds)
+| mv-expand RelatedAnalyticRuleIds to typeof(string)
+| where isnotempty(RelatedAnalyticRuleIds)
+| summarize IncidentCount = dcount(IncidentNumber) by RelatedAnalyticRuleIds
+| extend DailyAverage = round(todouble(IncidentCount) / todouble(LookbackDays), 2)
+| extend WeeklyAverage = round(DailyAverage * 7, 2)
+| join kind=inner rules on RelatedAnalyticRuleIds
+| join kind=leftouter RuleAuditStatus on RuleName
+| extend RuleStatus = coalesce(RuleStatus, "Active")
+| project RuleName, RuleStatus, IncidentCount, DailyAverage, WeeklyAverage, Severity = AlertSeverity
+| order by DailyAverage desc
+"@
+            $collectedData.IncidentVolumeByRule = Invoke-SentinelKqlQuery -WorkspaceId $workspaceId -Query $incidentVolumeQuery
+            if ($collectedData.IncidentVolumeByRule -and @($collectedData.IncidentVolumeByRule).Count -gt 0) {
+                Write-Host "      Incident volume: $(@($collectedData.IncidentVolumeByRule).Count) rules with incidents" -ForegroundColor Yellow
             }
         }
 
