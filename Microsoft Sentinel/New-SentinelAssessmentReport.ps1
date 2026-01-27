@@ -2403,7 +2403,7 @@ function ConvertTo-ReportHtml {
         <table class="table table-sm">
             <tr><td class="text-muted" style="width:140px">SKU</td><td>$sku</td></tr>
             <tr><td class="text-muted">Retention</td><td>$(Format-Plural $retention 'day')</td></tr>
-            <tr><td class="text-muted">Daily Cap</td><td>$(if ($dailyCap) { "$dailyCap GB" } else { 'Not configured' })</td></tr>
+            <tr><td class="text-muted">Daily Cap</td><td>$(if ($dailyCap -and $dailyCap -gt 0) { "$dailyCap GB" } else { 'Not configured' })</td></tr>
         </table>
         <h6 class="fw-bold text-muted text-uppercase mb-2 mt-3">Sentinel Features</h6>
         <div class="d-flex flex-wrap gap-2">
