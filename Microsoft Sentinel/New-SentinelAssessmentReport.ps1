@@ -5090,6 +5090,11 @@ $datasetsJsStr
           options.order = [[1, 'desc']];
         }
 
+        // Sort incident volume table by Daily Avg (column 4) descending
+        if (tableId === 'incidentVolumeTable') {
+          options.order = [[4, 'desc']];
+        }
+
         // Data Collection Health tables: 10 items per page, sorted by Time Since Last Event (oldest first)
         var dataCollectionHealthTables = ['staleTablesTable', 'syslogByComputerTable', 'cefByComputerTable', 'securityEventByComputerTable'];
         if (dataCollectionHealthTables.includes(tableId)) {
