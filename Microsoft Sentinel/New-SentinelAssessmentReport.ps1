@@ -1006,7 +1006,14 @@ function Invoke-AllHealthChecks {
         } else {
             'UEBA is not enabled. Consider enabling for advanced threat detection.'
         }
-        Details     = $null
+        Details     = if (-not $uebaEnabled) {
+            [ordered]@{
+                Recommendation   = 'Enable UEBA to gain advanced threat detection through behavioral profiling of users and entities across your environment.'
+                Benefits         = 'Identifies anomalous behaviors such as impossible travel, unusual resource access, and credential anomalies. Detects compromised accounts and surfaces insider threats using ML-based analytics. Enriches incidents with user and entity context for faster triage.'
+                'Learn more'     = 'https://learn.microsoft.com/en-us/azure/sentinel/identify-threats-with-entity-behavior-analytics'
+                'How to enable'  = 'https://learn.microsoft.com/en-us/azure/sentinel/enable-entity-behavior-analytics'
+            }
+        } else { $null }
     }
 
     # CFG-002: Anomalies Enabled
@@ -1416,7 +1423,14 @@ function Invoke-AllHealthChecks {
             Status      = $coverageStatus
             Severity    = if ($coverageStatus -eq 'Critical') { 'Critical' } else { 'Warning' }
             Description = "MITRE ATT&CK parent technique coverage: $($coverage.ParentCoveragePercent)% ($($coverage.CoveredParentCount)/$($coverage.TotalParentCount))$activeRuleNote"
-            Details     = $coverage
+            Details     = [ordered]@{
+                ParentCoverage = "$($coverage.CoveredParentCount)/$($coverage.TotalParentCount) ($($coverage.ParentCoveragePercent)%)"
+                SubTechniqueCoverage = "$($coverage.CoveredSubCount)/$($coverage.TotalSubCount) ($($coverage.SubCoveragePercent)%)"
+                UniqueTechniquesDetected = $coverage.TechniqueRuleMapping.Count
+                TacticCoverage = $coverage.TacticCoverage.GetEnumerator() | Sort-Object { $coverage.TacticOrder.IndexOf($_.Key) } | ForEach-Object {
+                    @{ Tactic = $_.Key; Covered = $_.Value.Covered; Total = $_.Value.Total; Rules = $_.Value.RuleCount }
+                }
+            }
         }
 
         # MIT-002: Uncovered Tactics
@@ -2404,7 +2418,7 @@ function ConvertTo-ReportHtml {
 
     # Build health checks table
     $healthChecksHtml = @"
-<table class="table table-hover report-table" id="healthChecksTable">
+<table class="table table-hover report-table flyout-enabled" id="healthChecksTable">
 <thead>
 <tr>
     <th>Check ID</th>
@@ -2412,6 +2426,7 @@ function ConvertTo-ReportHtml {
     <th>Check Name</th>
     <th>Status</th>
     <th>Description</th>
+    <th class="col-flyout-icon"></th>
 </tr>
 </thead>
 <tbody>
@@ -2425,17 +2440,181 @@ function ConvertTo-ReportHtml {
             'Info'     { '<span class="badge bg-info">Info</span>' }
             default    { '<span class="badge bg-secondary">Unknown</span>' }
         }
+        $hasDetails = $null -ne $check.Details -and (
+            ($check.Details -is [hashtable] -and $check.Details.Count -gt 0) -or
+            ($check.Details -is [System.Collections.IDictionary] -and $check.Details.Count -gt 0) -or
+            ($check.Details -is [array] -and $check.Details.Count -gt 0) -or
+            ($check.Details -is [string] -and $check.Details.Length -gt 0) -or
+            ($check.Details -is [psobject] -and $check.Details -isnot [string] -and $check.Details -isnot [array] -and $check.Details -isnot [hashtable])
+        )
+        $flyoutAttr = if ($hasDetails) { " data-flyout-id=`"$($check.CheckId)`"" } else { "" }
+        $chevronTd = if ($hasDetails) { '<td class="col-flyout-icon"><i data-lucide="chevron-right" style="width:16px;height:16px;color:#94a3b8"></i></td>' } else { '<td></td>' }
         $healthChecksHtml += @"
-<tr>
+<tr$flyoutAttr>
     <td><code>$($check.CheckId)</code></td>
     <td>$($check.Category)</td>
     <td>$($check.CheckName)</td>
     <td>$statusBadge</td>
     <td>$($check.Description)</td>
+    $chevronTd
 </tr>
 "@
     }
     $healthChecksHtml += "</tbody></table>"
+
+    # Build flyout data for health checks
+    $flyoutData = @{}
+    foreach ($check in $Data.HealthChecks) {
+        $d = $check.Details
+        if ($null -eq $d) { continue }
+
+        $detailsHtml = ""
+
+        if ($d -is [hashtable] -or $d -is [System.Collections.IDictionary]) {
+            # Hashtable -> definition list, with sub-rendering for complex values
+            $detailsHtml = '<dl class="row mb-0">'
+            foreach ($key in $d.Keys) {
+                $v = $d[$key]
+                $val = ''
+                if ($null -eq $v) {
+                    $val = '<span class="text-muted">-</span>'
+                } elseif ($v -is [array] -and $v.Count -gt 0 -and ($v[0] -is [hashtable] -or $v[0] -is [System.Collections.IDictionary])) {
+                    # Nested array of hashtables -> inline table
+                    $cols = @($v[0].Keys)
+                    $val = "<div class=`"table-responsive mt-1`"><table class=`"table table-sm table-bordered flyout-detail-table mb-0`"><thead><tr>"
+                    foreach ($c in $cols) { $val += "<th>$([System.Web.HttpUtility]::HtmlEncode($c))</th>" }
+                    $val += '</tr></thead><tbody>'
+                    foreach ($row in $v) {
+                        $val += '<tr>'
+                        foreach ($c in $cols) {
+                            $cellVal = if ($null -ne $row[$c]) { [System.Web.HttpUtility]::HtmlEncode("$($row[$c])") } else { '-' }
+                            $val += "<td>$cellVal</td>"
+                        }
+                        $val += '</tr>'
+                    }
+                    $val += '</tbody></table></div>'
+                } elseif ($v -is [array] -and $v.Count -gt 0 -and ($v[0] -is [psobject]) -and ($v[0] -isnot [string])) {
+                    # Nested array of PSObjects -> inline table
+                    $cols = @($v[0].PSObject.Properties | ForEach-Object { $_.Name })
+                    $val = "<div class=`"table-responsive mt-1`"><table class=`"table table-sm table-bordered flyout-detail-table mb-0`"><thead><tr>"
+                    foreach ($c in $cols) { $val += "<th>$([System.Web.HttpUtility]::HtmlEncode($c))</th>" }
+                    $val += '</tr></thead><tbody>'
+                    foreach ($row in $v) {
+                        $val += '<tr>'
+                        foreach ($c in $cols) {
+                            $cellVal = if ($null -ne $row.$c) { [System.Web.HttpUtility]::HtmlEncode("$($row.$c)") } else { '-' }
+                            $val += "<td>$cellVal</td>"
+                        }
+                        $val += '</tr>'
+                    }
+                    $val += '</tbody></table></div>'
+                } elseif ($v -is [array]) {
+                    # Nested array of scalars -> inline list
+                    $val = '<ul class="list-group list-group-flush">'
+                    foreach ($item in $v) { $val += "<li class=`"list-group-item px-0 py-1`">$([System.Web.HttpUtility]::HtmlEncode("$item"))</li>" }
+                    $val += '</ul>'
+                } else {
+                    $rawVal = "$v"
+                    $val = if ($rawVal -match '^https?://') {
+                        $encoded = [System.Web.HttpUtility]::HtmlEncode($rawVal)
+                        "<a href=`"$encoded`" target=`"_blank`" rel=`"noopener`">$encoded</a>"
+                    } else {
+                        [System.Web.HttpUtility]::HtmlEncode($rawVal)
+                    }
+                }
+                $detailsHtml += "<dt class=`"col-sm-5`">$([System.Web.HttpUtility]::HtmlEncode($key))</dt><dd class=`"col-sm-7`">$val</dd>"
+            }
+            $detailsHtml += '</dl>'
+        }
+        elseif ($d -is [array] -and $d.Count -gt 0) {
+            $first = $d[0]
+            if ($first -is [string]) {
+                # Array of strings -> list group with count badge
+                $detailsHtml = "<div class=`"mb-2`"><span class=`"badge bg-secondary`">$($d.Count) items</span></div>"
+                $detailsHtml += '<ul class="list-group list-group-flush">'
+                foreach ($item in $d) {
+                    $detailsHtml += "<li class=`"list-group-item px-0 py-1`">$([System.Web.HttpUtility]::HtmlEncode("$item"))</li>"
+                }
+                $detailsHtml += '</ul>'
+            }
+            elseif ($first -is [hashtable] -or $first -is [System.Collections.IDictionary]) {
+                # Array of hashtables -> table
+                $keys = @($first.Keys)
+                $detailsHtml = "<div class=`"mb-2`"><span class=`"badge bg-secondary`">$($d.Count) items</span></div>"
+                $detailsHtml += '<div class="table-responsive"><table class="table table-sm table-bordered flyout-detail-table mb-0"><thead><tr>'
+                foreach ($k in $keys) {
+                    $detailsHtml += "<th>$([System.Web.HttpUtility]::HtmlEncode($k))</th>"
+                }
+                $detailsHtml += '</tr></thead><tbody>'
+                foreach ($row in $d) {
+                    $detailsHtml += '<tr>'
+                    foreach ($k in $keys) {
+                        $cellVal = if ($null -ne $row[$k]) { [System.Web.HttpUtility]::HtmlEncode("$($row[$k])") } else { '-' }
+                        $detailsHtml += "<td>$cellVal</td>"
+                    }
+                    $detailsHtml += '</tr>'
+                }
+                $detailsHtml += '</tbody></table></div>'
+            }
+            elseif ($first -is [psobject]) {
+                # Array of PSObjects -> table
+                $props = @($first.PSObject.Properties | ForEach-Object { $_.Name })
+                if ($props.Count -gt 0) {
+                    $detailsHtml = "<div class=`"mb-2`"><span class=`"badge bg-secondary`">$($d.Count) items</span></div>"
+                    $detailsHtml += '<div class="table-responsive"><table class="table table-sm table-bordered flyout-detail-table mb-0"><thead><tr>'
+                    foreach ($p in $props) {
+                        $detailsHtml += "<th>$([System.Web.HttpUtility]::HtmlEncode($p))</th>"
+                    }
+                    $detailsHtml += '</tr></thead><tbody>'
+                    foreach ($row in $d) {
+                        $detailsHtml += '<tr>'
+                        foreach ($p in $props) {
+                            $cellVal = if ($null -ne $row.$p) { [System.Web.HttpUtility]::HtmlEncode("$($row.$p)") } else { '-' }
+                            $detailsHtml += "<td>$cellVal</td>"
+                        }
+                        $detailsHtml += '</tr>'
+                    }
+                    $detailsHtml += '</tbody></table></div>'
+                }
+            }
+        }
+        elseif ($d -is [psobject] -and $d -isnot [string]) {
+            # Single PSObject -> definition list
+            $props = @($d.PSObject.Properties | ForEach-Object { $_.Name })
+            if ($props.Count -gt 0) {
+                $detailsHtml = '<dl class="row mb-0">'
+                foreach ($p in $props) {
+                    $rawVal = "$($d.$p)"
+                    $val = if ($null -eq $d.$p) {
+                        '<span class="text-muted">-</span>'
+                    } elseif ($rawVal -match '^https?://') {
+                        $encoded = [System.Web.HttpUtility]::HtmlEncode($rawVal)
+                        "<a href=`"$encoded`" target=`"_blank`" rel=`"noopener`">$encoded</a>"
+                    } else {
+                        [System.Web.HttpUtility]::HtmlEncode($rawVal)
+                    }
+                    $detailsHtml += "<dt class=`"col-sm-5`">$([System.Web.HttpUtility]::HtmlEncode($p))</dt><dd class=`"col-sm-7`">$val</dd>"
+                }
+                $detailsHtml += '</dl>'
+            }
+        }
+        elseif ($d -is [string] -and $d.Length -gt 0) {
+            $detailsHtml = "<p>$([System.Web.HttpUtility]::HtmlEncode($d))</p>"
+        }
+
+        if ($detailsHtml.Length -gt 0) {
+            $flyoutData[$check.CheckId] = @{
+                checkId     = $check.CheckId
+                checkName   = $check.CheckName
+                category    = $check.Category
+                status      = $check.Status
+                description = $check.Description
+                detailsHtml = $detailsHtml
+            }
+        }
+    }
+    $flyoutJson = ($flyoutData | ConvertTo-Json -Depth 10 -Compress) -replace '</', '<\/'
+    $healthChecksHtml += "`n<script type=`"application/json`" id=`"healthChecksTableFlyoutData`">$flyoutJson</script>"
 
     # Build analytics rules table
     $analyticsHtml = @"
@@ -4186,12 +4365,21 @@ function ConvertTo-ReportHtml {
     .mitre-modal .zoom-controls { display: flex; align-items: center; gap: 0.5rem; }
     .mitre-modal .zoom-controls .btn { padding: 0.25rem 0.5rem; font-size: 0.875rem; }
     .mitre-modal .zoom-level { color: #334155; font-size: 0.875rem; min-width: 50px; text-align: center; }
+    /* Details Flyout */
+    .offcanvas-end#detailsFlyout { width: 33vw; min-width: 360px; }
+    .flyout-enabled tbody tr[data-flyout-id] { cursor: pointer; }
+    .flyout-enabled tbody tr[data-flyout-id]:hover { background-color: #f1f5f9 !important; }
+    .flyout-enabled .col-flyout-icon { width: 32px; text-align: center; }
+    .flyout-detail-table { font-size: 0.85rem; }
+    .flyout-detail-table th { background-color: #f8fafc; font-size: 0.75rem; text-transform: uppercase; color: #64748b; }
     @media print {
       .toc-container, .dt-buttons, .dataTables_filter, .dataTables_paginate { display: none !important; }
       .card { break-inside: avoid; }
       .mitre-svg-container { overflow: visible; }
       .mitre-svg-container::after { display: none; }
+      .offcanvas, .offcanvas-backdrop, .col-flyout-icon { display: none !important; }
     }
+    @media (max-width: 576px) { .offcanvas-end#detailsFlyout { width: 100%; } }
   </style>
 </head>
 <body>
@@ -4931,11 +5119,86 @@ $datasetsJsStr
           options.pageLength = 10;
         }
 
+        // Health checks flyout icon column: non-sortable, non-searchable
+        if (tableId === 'healthChecksTable') {
+          options.columnDefs = [{ targets: -1, orderable: false, searchable: false }];
+        }
+
         `$(this).DataTable(options);
+        `$(this).on('draw.dt', function() { lucide.createIcons(); });
         lucide.createIcons();
       });
+
+      // Generic flyout handler - auto-discovers all flyout-enabled tables
+      (function() {
+        var flyout = document.getElementById('detailsFlyout');
+        if (!flyout) return;
+        var bsOffcanvas = new bootstrap.Offcanvas(flyout);
+
+        var statusBadges = {
+          'Pass':     '<span class="badge bg-success">Pass</span>',
+          'Warning':  '<span class="badge bg-warning text-dark">Warning</span>',
+          'Critical': '<span class="badge bg-danger">Critical</span>',
+          'Info':     '<span class="badge bg-info">Info</span>'
+        };
+
+        function openFlyout(data) {
+          document.getElementById('flyoutCheckId').textContent = data.checkId || '';
+          document.getElementById('flyoutStatusBadge').innerHTML = statusBadges[data.status] || '';
+          document.getElementById('detailsFlyoutLabel').textContent = data.checkName || '';
+          document.getElementById('flyoutCategory').textContent = data.category || '';
+          document.getElementById('flyoutDescription').textContent = data.description || '';
+          var section = document.getElementById('flyoutDetailsSection');
+          var content = document.getElementById('flyoutDetailsContent');
+          if (data.detailsHtml) {
+            section.style.display = '';
+            content.innerHTML = data.detailsHtml;
+          } else {
+            section.style.display = 'none';
+          }
+          bsOffcanvas.show();
+        }
+
+        `$('.flyout-enabled').each(function() {
+          var tableId = `$(this).attr('id');
+          var dataEl = document.getElementById(tableId + 'FlyoutData');
+          if (!dataEl) return;
+          var data = JSON.parse(dataEl.textContent);
+          `$('#' + tableId + ' tbody').on('click', 'tr[data-flyout-id]', function() {
+            var key = `$(this).attr('data-flyout-id');
+            if (data[key]) openFlyout(data[key]);
+          });
+        });
+      })();
     });
   </script>
+<div class="offcanvas offcanvas-end" tabindex="-1" id="detailsFlyout" aria-labelledby="detailsFlyoutLabel">
+  <div class="offcanvas-header border-bottom">
+    <div>
+      <div class="d-flex align-items-center gap-2 mb-1">
+        <span id="flyoutStatusBadge"></span>
+        <code id="flyoutCheckId"></code>
+      </div>
+      <h5 class="offcanvas-title mb-0" id="detailsFlyoutLabel"></h5>
+    </div>
+    <button type="button" class="btn-close" data-bs-dismiss="offcanvas" aria-label="Close"></button>
+  </div>
+  <div class="offcanvas-body">
+    <div class="mb-3">
+      <span class="text-muted small text-uppercase fw-bold">Category</span>
+      <div id="flyoutCategory"></div>
+    </div>
+    <div class="mb-3">
+      <span class="text-muted small text-uppercase fw-bold">Description</span>
+      <div id="flyoutDescription"></div>
+    </div>
+    <hr>
+    <div id="flyoutDetailsSection">
+      <span class="text-muted small text-uppercase fw-bold">Details</span>
+      <div id="flyoutDetailsContent" class="mt-2"></div>
+    </div>
+  </div>
+</div>
 </body>
 </html>
 "@
