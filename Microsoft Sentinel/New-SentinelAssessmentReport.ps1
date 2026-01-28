@@ -1739,20 +1739,29 @@ function Get-RulesWithUpdates {
 
     $rulesWithUpdates = @()
 
-    # Build template version lookup
-    $templateVersions = @{}
-
-    # From Content Hub templates
+    # Content Hub lookup: name -> @{ Version; PackageName }
+    $contentHubTemplates = @{}
     foreach ($template in $ContentTemplates) {
         if ($template.properties.contentKind -eq 'AnalyticsRule') {
-            $templateVersions[$template.name] = Get-SafeProperty $template.properties 'version'
+            $ver = Get-SafeProperty $template.properties 'version'
+            $pkg = Get-SafeProperty $template.properties 'packageName'
+            if ($ver) {
+                $contentHubTemplates[$template.name] = @{
+                    Version     = $ver
+                    PackageName = if ($pkg) { $pkg } else { 'Unknown solution' }
+                }
+            }
         }
     }
 
-    # From built-in alert rule templates
+    # Built-in alert rule templates (fallback)
+    $builtInTemplates = @{}
     foreach ($template in $AlertRuleTemplates) {
-        if (-not $templateVersions.ContainsKey($template.name)) {
-            $templateVersions[$template.name] = Get-SafeProperty $template.properties 'version'
+        if (-not $contentHubTemplates.ContainsKey($template.name)) {
+            $ver = Get-SafeProperty $template.properties 'version'
+            if ($ver) {
+                $builtInTemplates[$template.name] = $ver
+            }
         }
     }
 
@@ -1761,8 +1770,18 @@ function Get-RulesWithUpdates {
         $templateName = Get-SafeProperty $rule.properties 'alertRuleTemplateName'
         $ruleVersion = Get-SafeProperty $rule.properties 'templateVersion'
 
-        if ($templateName -and $ruleVersion -and $templateVersions.ContainsKey($templateName)) {
-            $templateVersion = $templateVersions[$templateName]
+        if ($templateName -and $ruleVersion) {
+            $templateVersion = $null
+            $updateSource = $null
+
+            if ($contentHubTemplates.ContainsKey($templateName)) {
+                $templateVersion = $contentHubTemplates[$templateName].Version
+                $updateSource = "Content Hub: $($contentHubTemplates[$templateName].PackageName)"
+            }
+            elseif ($builtInTemplates.ContainsKey($templateName)) {
+                $templateVersion = $builtInTemplates[$templateName]
+                $updateSource = 'Built-in template'
+            }
 
             if ($templateVersion) {
                 try {
@@ -1775,6 +1794,7 @@ function Get-RulesWithUpdates {
                             CurrentVersion  = $ruleVersion
                             TemplateVersion = $templateVersion
                             TemplateName    = $templateName
+                            UpdateSource    = $updateSource
                         }
                     }
                 }
@@ -2930,13 +2950,13 @@ function ConvertTo-ReportHtml {
     if ($rulesWithUpdatesCheck -and $rulesWithUpdatesCheck.Details -and @($rulesWithUpdatesCheck.Details).Count -gt 0) {
         $rulesWithUpdatesHtml = @"
 <h5 class="mt-4 mb-3" id="rules-updates"><span class="badge bg-info me-2">$(@($rulesWithUpdatesCheck.Details).Count)</span> Rules with Pending Updates</h5>
-<p class="text-muted small">Rules whose template version is behind the latest available version from Content Hub or built-in alert rule templates.</p>
+<p class="text-muted small">Content Hub is the current source for Scheduled and NRT rule template updates. Rules showing &quot;Content Hub&quot; can be updated directly via the Sentinel GUI. Rules showing &quot;Built-in template&quot; are matched against the legacy alertRuleTemplates API only &mdash; install the corresponding Content Hub solution to receive future updates via the GUI. Fusion, ML Behavior Analytics, Microsoft Security, and Threat Intelligence rules are platform-managed and do not use Content Hub.</p>
 <table class="table table-hover table-sm report-table" id="rulesUpdatesTable">
-<thead><tr><th>Rule Name</th><th>Current Version</th><th>Available Version</th></tr></thead>
+<thead><tr><th>Rule Name</th><th>Current Version</th><th>Available Version</th><th>Update Source</th></tr></thead>
 <tbody>
 "@
         foreach ($rule in $rulesWithUpdatesCheck.Details) {
-            $rulesWithUpdatesHtml += "<tr><td>$([System.Web.HttpUtility]::HtmlEncode($rule.RuleName))</td><td><code>$($rule.CurrentVersion)</code></td><td><code>$($rule.TemplateVersion)</code></td></tr>"
+            $rulesWithUpdatesHtml += "<tr><td>$([System.Web.HttpUtility]::HtmlEncode($rule.RuleName))</td><td><code>$($rule.CurrentVersion)</code></td><td><code>$($rule.TemplateVersion)</code></td><td>$([System.Web.HttpUtility]::HtmlEncode($rule.UpdateSource))</td></tr>"
         }
         $rulesWithUpdatesHtml += "</tbody></table>"
     }
