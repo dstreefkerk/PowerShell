@@ -592,15 +592,20 @@ function Get-SentinelContentPackages {
 function Get-SentinelProductTemplates {
     <#
     .SYNOPSIS
-    Retrieves the Content Hub product catalog of analytics rule templates.
+    Retrieves the Content Hub product catalog of templates.
     Returns all templates (not just installed), allowing lookup of which solution provides each template.
+    When ContentKind is specified, filters to that kind (e.g., 'AnalyticsRule', 'DataConnector').
     #>
     param(
         [string]$BaseUri,
-        [hashtable]$Headers
+        [hashtable]$Headers,
+        [string]$ContentKind
     )
 
-    $uri = "$BaseUri/contentProductTemplates?api-version=2025-03-01&`$filter=properties/contentKind eq 'AnalyticsRule'"
+    $uri = "$BaseUri/contentProductTemplates?api-version=2025-03-01"
+    if ($ContentKind) {
+        $uri += "&`$filter=properties/contentKind eq '$ContentKind'"
+    }
     $allTemplates = @()
 
     do {
@@ -1687,6 +1692,110 @@ function Invoke-AllHealthChecks {
     return ,$checks
 }
 
+function Resolve-ConnectorDisplayName {
+    <#
+    .SYNOPSIS
+    Resolves friendly display names for data connectors and deduplicates entries.
+    Each connector gets a canonical identifier (name for StaticUI/GenericUI/RestApiPoller, kind otherwise),
+    a display name (from catalog, static map, or raw identifier), and duplicates are removed.
+    #>
+    param(
+        [array]$Connectors,
+        [array]$ProductTemplatesConnector,
+        [hashtable]$ConnectorHealthLookup = @{}
+    )
+
+    # 1. Build catalog lookup from product templates: contentId → displayName
+    $catalogLookup = @{}
+    foreach ($pt in $ProductTemplatesConnector) {
+        $contentId = Get-SafeProperty $pt.properties 'contentId'
+        $displayName = Get-SafeProperty $pt.properties 'displayName'
+        if ($contentId -and $displayName) {
+            $catalogLookup[$contentId] = $displayName
+        }
+    }
+
+    # 2. Static fallback map for well-known identifiers
+    $staticDisplayNames = @{
+        'AzureActiveDirectory'              = 'Microsoft Entra ID'
+        'Office365'                         = 'Microsoft 365'
+        'MicrosoftThreatProtection'         = 'Microsoft Defender XDR'
+        'MicrosoftDefenderAdvancedThreatProtection' = 'Microsoft Defender for Endpoint'
+        'AzureSecurityCenter'               = 'Microsoft Defender for Cloud'
+        'MicrosoftDefenderForCloudTenantBased' = 'Microsoft Defender for Cloud (Tenant)'
+        'AzureAdvancedThreatProtection'     = 'Microsoft Defender for Identity'
+        'MicrosoftCloudAppSecurity'         = 'Microsoft Defender for Cloud Apps'
+        'AzureActivity'                     = 'Azure Activity'
+        'SecurityEvents'                    = 'Security Events (Legacy)'
+        'WindowsSecurityEvents'             = 'Windows Security Events (AMA)'
+        'WindowsForwardedEvents'            = 'Windows Forwarded Events'
+        'Syslog'                            = 'Syslog (Legacy)'
+        'SyslogAma'                         = 'Syslog (AMA)'
+        'ThreatIntelligence'                = 'Threat Intelligence Platforms'
+        'ThreatIntelligenceTaxii'           = 'Threat Intelligence (TAXII)'
+        'ThreatIntelligenceUploadIndicatorsAPI' = 'Threat Intelligence Upload Indicators API'
+        'MicrosoftThreatIntelligence'       = 'Microsoft Threat Intelligence'
+        'MicrosoftDefenderThreatIntelligence' = 'Microsoft Defender Threat Intelligence'
+        'PremiumMicrosoftDefenderForThreatIntelligence' = 'Microsoft Defender Threat Intelligence (Premium)'
+        'OfficeATP'                         = 'Microsoft Defender for Office 365'
+        'OfficeIRM'                         = 'Microsoft Office IRM'
+        'MicrosoftPurviewInformationProtection' = 'Microsoft Purview Information Protection'
+        'AzureKeyVault'                     = 'Azure Key Vault'
+        'AzureActiveDirectoryIdentityProtection' = 'Microsoft Entra ID Protection'
+    }
+
+    # 3. Resolve identifier and display name for each connector
+    if (-not $Connectors -or $Connectors.Count -eq 0) { return ,@() }
+
+    $kindsUsingName = @('StaticUI', 'GenericUI', 'RestApiPoller')
+    $annotated = @(foreach ($connector in $Connectors) {
+        if ($null -eq $connector) { continue }
+        $connectorKind = $connector.kind
+        $connectorName = $connector.name
+
+        # Determine canonical identifier
+        $identifier = if ($connectorKind -in $kindsUsingName) { $connectorName } else { $connectorKind }
+        if (-not $identifier) { $identifier = if ($connectorName) { $connectorName } else { $connectorKind } }
+
+        # Resolve display name: catalog → static map → raw identifier
+        $displayName = if ($identifier) { $catalogLookup[$identifier] } else { $null }
+        if (-not $displayName -and $identifier) { $displayName = $staticDisplayNames[$identifier] }
+        if (-not $displayName) { $displayName = if ($identifier) { $identifier } else { '(Unknown)' } }
+
+        # Attach note properties
+        $connector | Add-Member -NotePropertyName '_DisplayName' -NotePropertyValue $displayName -Force
+        $connector | Add-Member -NotePropertyName '_Identifier' -NotePropertyValue $identifier -Force
+        $connector
+    })
+
+    if ($annotated.Count -eq 0) { return ,@() }
+
+    # 4. Deduplicate: group by canonical identifier, keep one entry per group
+    $grouped = $annotated | Group-Object -Property '_Identifier'
+    $deduplicated = @(foreach ($group in $grouped) {
+        if ($group.Count -eq 1) {
+            $group.Group[0]
+        } else {
+            # Prefer entry with health data available
+            $withHealth = @($group.Group | Where-Object {
+                ($_.name -and $ConnectorHealthLookup.ContainsKey($_.name)) -or
+                ($_.kind -and $ConnectorHealthLookup.ContainsKey($_.kind))
+            })
+            if ($withHealth.Count -gt 0) {
+                # Among those with health, prefer StaticUI/GenericUI (Content Hub version)
+                $preferred = @($withHealth | Where-Object { $_.kind -in $kindsUsingName })
+                if ($preferred.Count -gt 0) { $preferred[0] } else { $withHealth[0] }
+            } else {
+                # No health data — prefer StaticUI/GenericUI entry
+                $preferred = @($group.Group | Where-Object { $_.kind -in $kindsUsingName })
+                if ($preferred.Count -gt 0) { $preferred[0] } else { $group.Group[0] }
+            }
+        }
+    })
+
+    return ,$deduplicated
+}
+
 function Get-ConnectorsWithUpdates {
     <#
     .SYNOPSIS
@@ -2504,7 +2613,10 @@ function ConvertTo-ReportHtml {
     $totalRules = $Data.AnalyticsRules.Count
     $enabledRules = @($Data.AnalyticsRules | Where-Object { (Get-SafeProperty $_.properties 'enabled') -eq $true }).Count
     $disabledRules = $totalRules - $enabledRules
-    $connectorCount = $Data.DataConnectors.Count
+    # Count unique connectors (deduplicated by canonical identifier)
+    $connectorCount = @($Data.DataConnectors | ForEach-Object {
+        if ($_.kind -in @('StaticUI', 'GenericUI', 'RestApiPoller')) { $_.name } else { $_.kind }
+    } | Select-Object -Unique).Count
     $mitreCoverage = if ($Data.MitreCoverage) { $Data.MitreCoverage.ParentCoveragePercent } else { 'N/A' }
     $mitreActiveRuleCount = if ($Data.MitreCoverage -and $Data.MitreCoverage.ActiveRuleCount) { $Data.MitreCoverage.ActiveRuleCount } else { 0 }
 
@@ -3432,20 +3544,29 @@ function ConvertTo-ReportHtml {
 <tbody>
 "@
 
-    foreach ($connector in $Data.DataConnectors) {
+    # Resolve display names and deduplicate connectors
+    $resolvedConnectors = Resolve-ConnectorDisplayName -Connectors $Data.DataConnectors -ProductTemplatesConnector $Data.ProductTemplatesConnector -ConnectorHealthLookup $connectorHealthLookup
+
+    foreach ($connector in $resolvedConnectors) {
+        if ($null -eq $connector) { continue }
         $connectorName = $connector.name
         $connectorKind = $connector.kind
+        # Use resolved properties with fallbacks in case Add-Member didn't attach them
+        $connectorIdentifier = if ($connector.PSObject.Properties['_Identifier']) { $connector._Identifier } else { if ($connectorKind -in @('StaticUI', 'GenericUI', 'RestApiPoller')) { $connectorName } else { $connectorKind } }
+        $connectorDisplayName = if ($connector.PSObject.Properties['_DisplayName']) { $connector._DisplayName } else { if ($connectorIdentifier) { $connectorIdentifier } else { $connectorName } }
 
-        # Get health status - try name first (matches SentinelResourceName prefix), then kind as fallback
-        $health = $connectorHealthLookup[$connectorName]
-        if (-not $health) { $health = $connectorHealthLookup[$connectorKind] }
-        $healthStatus = if ($health) { $health.Status } else { 'Unknown' }
+        # Get health status - try identifier first (canonical), then name, then kind as fallback
+        $health = if ($connectorIdentifier) { $connectorHealthLookup[$connectorIdentifier] } else { $null }
+        if (-not $health -and $connectorName) { $health = $connectorHealthLookup[$connectorName] }
+        if (-not $health -and $connectorKind) { $health = $connectorHealthLookup[$connectorKind] }
+        $healthStatus = if ($health) { Get-SafeProperty $health 'Status' } else { $null }
+        if (-not $healthStatus) { $healthStatus = 'Unknown' }
         $lastSeenSource = 'none'
 
         # Get last seen - try SentinelHealth first, then fallback to table last event
         $lastSeen = '-'
         $lastSeenDateTime = $null
-        if ($health -and $health.TimeGenerated) {
+        if ($health -and (Get-SafeProperty $health 'TimeGenerated')) {
             try {
                 $lastSeenDateTime = [datetime]$health.TimeGenerated
                 $lastSeen = $lastSeenDateTime.ToString('yyyy-MM-dd HH:mm')
@@ -3455,9 +3576,10 @@ function ConvertTo-ReportHtml {
 
         # Fallback 1: Try connector-specific last seen (for shared tables like SecurityAlert)
         if ($lastSeen -eq '-') {
-            # Try connector name first, then kind
-            $connectorLastEvent = $connectorLastSeenLookup[$connectorName]
-            if (-not $connectorLastEvent) { $connectorLastEvent = $connectorLastSeenLookup[$connectorKind] }
+            # Try identifier first, then name, then kind
+            $connectorLastEvent = if ($connectorIdentifier) { $connectorLastSeenLookup[$connectorIdentifier] } else { $null }
+            if (-not $connectorLastEvent -and $connectorName) { $connectorLastEvent = $connectorLastSeenLookup[$connectorName] }
+            if (-not $connectorLastEvent -and $connectorKind) { $connectorLastEvent = $connectorLastSeenLookup[$connectorKind] }
             if ($connectorLastEvent) {
                 try {
                     $lastSeenDateTime = [datetime]$connectorLastEvent
@@ -3469,8 +3591,9 @@ function ConvertTo-ReportHtml {
 
         # Fallback 2: Try to get last seen from the connector's primary table
         if ($lastSeen -eq '-') {
-            $tableName = $connectorTableMap[$connectorName]
-            if (-not $tableName) { $tableName = $connectorTableMap[$connectorKind] }
+            $tableName = if ($connectorIdentifier) { $connectorTableMap[$connectorIdentifier] } else { $null }
+            if (-not $tableName -and $connectorName) { $tableName = $connectorTableMap[$connectorName] }
+            if (-not $tableName -and $connectorKind) { $tableName = $connectorTableMap[$connectorKind] }
             if ($tableName -and $tableLastSeenLookup.ContainsKey($tableName)) {
                 $tableLastEvent = $tableLastSeenLookup[$tableName]
                 if ($tableLastEvent) {
@@ -3507,8 +3630,8 @@ function ConvertTo-ReportHtml {
 
         $connectorsHtml += @"
 <tr>
-    <td>$([System.Web.HttpUtility]::HtmlEncode($connectorName))</td>
-    <td><code>$connectorKind</code></td>
+    <td>$([System.Web.HttpUtility]::HtmlEncode($connectorDisplayName))</td>
+    <td><code>$connectorIdentifier</code></td>
     <td>$healthBadge</td>
     <td><small class="text-muted">$lastSeen</small></td>
 </tr>
@@ -3517,6 +3640,20 @@ function ConvertTo-ReportHtml {
     $connectorsHtml += "</tbody></table>"
 
     # Build Connectors with Updates sub-table (from CON-001)
+    # Build display name lookup from resolved connectors for the updates table
+    $connectorDisplayNameLookup = @{}
+    foreach ($rc in $resolvedConnectors) {
+        if ($null -eq $rc) { continue }
+        if ($rc._Identifier -and $rc._DisplayName) {
+            $connectorDisplayNameLookup[$rc._Identifier] = $rc._DisplayName
+        }
+        # Also index by raw name and kind for fallback matching
+        if ($rc.name -and $rc._DisplayName) { $connectorDisplayNameLookup[$rc.name] = $rc._DisplayName }
+        if ($rc.kind -and $rc._DisplayName -and -not $connectorDisplayNameLookup.ContainsKey($rc.kind)) {
+            $connectorDisplayNameLookup[$rc.kind] = $rc._DisplayName
+        }
+    }
+
     $connectorsUpdatesCheck = $Data.HealthChecks | Where-Object { $_.CheckId -eq 'CON-001' }
     if ($connectorsUpdatesCheck -and $connectorsUpdatesCheck.Details -and @($connectorsUpdatesCheck.Details).Count -gt 0) {
         $connectorsHtml += @"
@@ -3527,7 +3664,17 @@ function ConvertTo-ReportHtml {
 <tbody>
 "@
         foreach ($update in $connectorsUpdatesCheck.Details) {
-            $connectorsHtml += "<tr><td>$([System.Web.HttpUtility]::HtmlEncode($update.ConnectorName))</td><td><code>$($update.ConnectorKind)</code></td><td><code>$($update.CurrentVersion)</code></td><td><code>$($update.TemplateVersion)</code></td></tr>"
+            if ($null -eq $update) { continue }
+            # Resolve display name for the connector update entry
+            $updateConnectorName = $update.ConnectorName
+            $updateConnectorKind = $update.ConnectorKind
+            $updateDisplayName = if ($updateConnectorName) { $connectorDisplayNameLookup[$updateConnectorName] } else { $null }
+            if (-not $updateDisplayName -and $updateConnectorKind) { $updateDisplayName = $connectorDisplayNameLookup[$updateConnectorKind] }
+            if (-not $updateDisplayName) { $updateDisplayName = if ($updateConnectorName) { $updateConnectorName } else { '(Unknown)' } }
+            # Determine canonical identifier (same logic as Resolve-ConnectorDisplayName)
+            $updateIdentifier = if ($updateConnectorKind -in @('StaticUI', 'GenericUI', 'RestApiPoller')) { $updateConnectorName } else { $updateConnectorKind }
+            if (-not $updateIdentifier) { $updateIdentifier = if ($updateConnectorName) { $updateConnectorName } else { $updateConnectorKind } }
+            $connectorsHtml += "<tr><td>$([System.Web.HttpUtility]::HtmlEncode($updateDisplayName))</td><td><code>$updateIdentifier</code></td><td><code>$($update.CurrentVersion)</code></td><td><code>$($update.TemplateVersion)</code></td></tr>"
         }
         $connectorsHtml += "</tbody></table>"
     }
@@ -5612,6 +5759,7 @@ $collectedData = @{
     ContentTemplates   = @()
     ContentPackages    = @()
     ProductTemplates   = @()
+    ProductTemplatesConnector = @()
     SourceControls     = @()
     WorkspaceManagerConfig = $null
     WorkspaceManagerMembers = @()
@@ -5689,10 +5837,17 @@ catch { Write-Warning "    Failed to fetch content packages: $_" }
 
 Write-Host "  Fetching product template catalog..." -ForegroundColor DarkGray
 try {
-    $collectedData.ProductTemplates = Get-SentinelProductTemplates -BaseUri $sentinelBaseUri -Headers $authHeader
+    $collectedData.ProductTemplates = Get-SentinelProductTemplates -BaseUri $sentinelBaseUri -Headers $authHeader -ContentKind 'AnalyticsRule'
     Write-Host "    Retrieved $($collectedData.ProductTemplates.Count) product templates" -ForegroundColor Green
 }
 catch { Write-Warning "    Failed to fetch product templates: $_" }
+
+Write-Host "  Fetching data connector product templates..." -ForegroundColor DarkGray
+try {
+    $collectedData.ProductTemplatesConnector = Get-SentinelProductTemplates -BaseUri $sentinelBaseUri -Headers $authHeader -ContentKind 'DataConnector'
+    Write-Host "    Retrieved $($collectedData.ProductTemplatesConnector.Count) data connector product templates" -ForegroundColor Green
+}
+catch { Write-Warning "    Failed to fetch data connector product templates: $_" }
 
 Write-Host "  Fetching source control connections..." -ForegroundColor DarkGray
 try {
