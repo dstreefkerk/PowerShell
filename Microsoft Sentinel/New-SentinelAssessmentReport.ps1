@@ -1785,7 +1785,8 @@ function Get-RulesWithUpdates {
         }
     }
 
-    return ,$rulesWithUpdates
+    # Output items individually to avoid array-wrapping issues with @() caller
+    foreach ($item in $rulesWithUpdates) { $item }
 }
 
 function Get-VisibilityGaps {
