@@ -589,6 +589,31 @@ function Get-SentinelContentPackages {
     return ,$allPackages
 }
 
+function Get-SentinelProductTemplates {
+    <#
+    .SYNOPSIS
+    Retrieves the Content Hub product catalog of analytics rule templates.
+    Returns all templates (not just installed), allowing lookup of which solution provides each template.
+    #>
+    param(
+        [string]$BaseUri,
+        [hashtable]$Headers
+    )
+
+    $uri = "$BaseUri/contentProductTemplates?api-version=2025-03-01&`$filter=properties/contentKind eq 'AnalyticsRule'"
+    $allTemplates = @()
+
+    do {
+        $response = Invoke-RestMethodWithRetry -Uri $uri -Method 'GET' -Headers $Headers
+        if ($response.value) {
+            $allTemplates += $response.value
+        }
+        $uri = if ($response.PSObject.Properties['nextLink']) { $response.nextLink } else { $null }
+    } while ($uri)
+
+    return ,$allTemplates
+}
+
 function Get-SentinelSourceControls {
     <#
     .SYNOPSIS
@@ -1164,7 +1189,7 @@ function Invoke-AllHealthChecks {
     }
 
     # ANA-001: Rules with Updates
-    $rulesWithUpdates = @(Get-RulesWithUpdates -Rules $CollectedData.AnalyticsRules -AlertRuleTemplates $CollectedData.AlertRuleTemplates -ContentTemplates $CollectedData.ContentTemplates)
+    $rulesWithUpdates = @(Get-RulesWithUpdates -Rules $CollectedData.AnalyticsRules -AlertRuleTemplates $CollectedData.AlertRuleTemplates -ContentTemplates $CollectedData.ContentTemplates -ProductTemplates $CollectedData.ProductTemplates)
     $checks += [PSCustomObject]@{
         CheckId     = 'ANA-001'
         CheckName   = 'Rules with Updates'
@@ -1261,6 +1286,18 @@ function Invoke-AllHealthChecks {
             Description = if ($highVolumeRules.Count -eq 0) { "No rules averaging more than $highVolumeThreshold incidents/day over 30 days." } else { "$(Format-Plural $highVolumeRules.Count 'rule') averaging more than $highVolumeThreshold incidents/day. Review for tuning opportunities." }
             Details     = $highVolumeRules | ForEach-Object { "$($_.RuleName) ($($_.DailyAverage)/day)" }
         }
+    }
+
+    # ANA-008: Legacy Template Rules
+    $legacyTemplateRules = @(Get-LegacyTemplateRules -Rules $CollectedData.AnalyticsRules -AlertRuleTemplates $CollectedData.AlertRuleTemplates -ContentTemplates $CollectedData.ContentTemplates -ProductTemplates $CollectedData.ProductTemplates -ContentPackages $CollectedData.ContentPackages)
+    $checks += [PSCustomObject]@{
+        CheckId     = 'ANA-008'
+        CheckName   = 'Legacy Template Rules'
+        Category    = 'Analytics Rules'
+        Status      = if ($legacyTemplateRules.Count -eq 0) { 'Pass' } else { 'Warning' }
+        Severity    = 'Warning'
+        Description = if ($legacyTemplateRules.Count -eq 0) { 'All template-based rules are managed via Content Hub.' } else { "$(Format-Plural $legacyTemplateRules.Count 'rule') still running on legacy built-in templates. Install the corresponding Content Hub solutions to receive managed updates." }
+        Details     = $legacyTemplateRules
     }
 
     # Analytics Health checks (from _SentinelHealth table, if available)
@@ -1734,7 +1771,8 @@ function Get-RulesWithUpdates {
     param(
         [array]$Rules,
         [array]$AlertRuleTemplates,
-        [array]$ContentTemplates
+        [array]$ContentTemplates,
+        [array]$ProductTemplates
     )
 
     $rulesWithUpdates = @()
@@ -1765,6 +1803,18 @@ function Get-RulesWithUpdates {
         }
     }
 
+    # Product catalog lookup: contentId -> solution name (from source.name)
+    $productCatalogLookup = @{}
+    foreach ($pt in $ProductTemplates) {
+        $contentId = Get-SafeProperty $pt.properties 'contentId'
+        $sourceName = $null
+        $source = Get-SafeProperty $pt.properties 'source'
+        if ($source) { $sourceName = Get-SafeProperty $source 'name' }
+        if ($contentId -and $sourceName) {
+            $productCatalogLookup[$contentId] = $sourceName
+        }
+    }
+
     # Compare rule versions
     foreach ($rule in $Rules) {
         $templateName = Get-SafeProperty $rule.properties 'alertRuleTemplateName'
@@ -1780,7 +1830,11 @@ function Get-RulesWithUpdates {
             }
             elseif ($builtInTemplates.ContainsKey($templateName)) {
                 $templateVersion = $builtInTemplates[$templateName]
-                $updateSource = 'Built-in template'
+                if ($productCatalogLookup.ContainsKey($templateName)) {
+                    $updateSource = "Built-in template (install '$($productCatalogLookup[$templateName])' from Content Hub)"
+                } else {
+                    $updateSource = 'Built-in template'
+                }
             }
 
             if ($templateVersion) {
@@ -1807,6 +1861,100 @@ function Get-RulesWithUpdates {
 
     # Output items individually to avoid array-wrapping issues with @() caller
     foreach ($item in $rulesWithUpdates) { $item }
+}
+
+function Get-LegacyTemplateRules {
+    <#
+    .SYNOPSIS
+    Identifies analytics rules still running on legacy built-in templates (not managed via Content Hub).
+    Cross-references the Content Hub product catalog to find which solution provides each template.
+    #>
+    param(
+        [array]$Rules,
+        [array]$AlertRuleTemplates,
+        [array]$ContentTemplates,
+        [array]$ProductTemplates,
+        [array]$ContentPackages
+    )
+
+    $results = @()
+
+    # 1. Build set of installed Content Hub template GUIDs
+    $installedContentTemplateIds = @{}
+    foreach ($ct in $ContentTemplates) {
+        if ($ct.properties.contentKind -eq 'AnalyticsRule') {
+            $installedContentTemplateIds[$ct.name] = $true
+        }
+    }
+
+    # 2. Build set of built-in template GUIDs
+    $builtInTemplateIds = @{}
+    foreach ($t in $AlertRuleTemplates) {
+        $builtInTemplateIds[$t.name] = $true
+    }
+
+    # 3. Build catalog lookup: contentId -> { SolutionName, PackageId }
+    $catalogLookup = @{}
+    foreach ($pt in $ProductTemplates) {
+        $contentId = Get-SafeProperty $pt.properties 'contentId'
+        $sourceName = $null
+        $source = Get-SafeProperty $pt.properties 'source'
+        if ($source) { $sourceName = Get-SafeProperty $source 'name' }
+        $packageId = Get-SafeProperty $pt.properties 'packageId'
+        if ($contentId -and $sourceName) {
+            $catalogLookup[$contentId] = @{
+                SolutionName = $sourceName
+                PackageId    = if ($packageId) { $packageId } else { '' }
+            }
+        }
+    }
+
+    # 4. Build set of installed package IDs
+    $installedPackageIds = @{}
+    foreach ($pkg in $ContentPackages) {
+        $pkgContentId = Get-SafeProperty $pkg.properties 'contentId'
+        if ($pkgContentId) {
+            $installedPackageIds[$pkgContentId] = $true
+        }
+    }
+
+    # 5. Platform-managed kinds to skip
+    $platformManagedKinds = @('Fusion', 'MLBehaviorAnalytics', 'MicrosoftSecurityIncidentCreation', 'ThreatIntelligence')
+
+    foreach ($rule in $Rules) {
+        $kind = $rule.kind
+        if ($kind -and $platformManagedKinds -contains $kind) { continue }
+
+        $templateName = Get-SafeProperty $rule.properties 'alertRuleTemplateName'
+        if (-not $templateName) { continue }
+
+        # Skip if already managed via Content Hub
+        if ($installedContentTemplateIds.ContainsKey($templateName)) { continue }
+
+        # Skip if not in built-in templates (custom or unknown)
+        if (-not $builtInTemplateIds.ContainsKey($templateName)) { continue }
+
+        # Look up in product catalog
+        if ($catalogLookup.ContainsKey($templateName)) {
+            $catalogEntry = $catalogLookup[$templateName]
+
+            # Skip if the solution is already installed
+            if ($catalogEntry.PackageId -and $installedPackageIds.ContainsKey($catalogEntry.PackageId)) { continue }
+
+            $props = $rule.properties
+            $results += [PSCustomObject]@{
+                RuleName     = Get-SafeProperty $props 'displayName'
+                RuleKind     = $kind
+                Severity     = Get-SafeProperty $props 'severity'
+                Enabled      = Get-SafeProperty $props 'enabled'
+                SolutionName = $catalogEntry.SolutionName
+                PackageId    = $catalogEntry.PackageId
+                TemplateName = $templateName
+            }
+        }
+    }
+
+    foreach ($item in $results) { $item }
 }
 
 function Get-VisibilityGaps {
@@ -2959,6 +3107,44 @@ function ConvertTo-ReportHtml {
             $rulesWithUpdatesHtml += "<tr><td>$([System.Web.HttpUtility]::HtmlEncode($rule.RuleName))</td><td><code>$($rule.CurrentVersion)</code></td><td><code>$($rule.TemplateVersion)</code></td><td>$([System.Web.HttpUtility]::HtmlEncode($rule.UpdateSource))</td></tr>"
         }
         $rulesWithUpdatesHtml += "</tbody></table>"
+    }
+
+    # Build Legacy Template Rules section (from health check ANA-008)
+    $legacyTemplateCheck = $Data.HealthChecks | Where-Object { $_.CheckId -eq 'ANA-008' }
+    $legacyTemplateHtml = ""
+    if ($legacyTemplateCheck -and $legacyTemplateCheck.Details -and @($legacyTemplateCheck.Details).Count -gt 0) {
+        $legacyDetails = @($legacyTemplateCheck.Details | Sort-Object SolutionName, RuleName)
+        $standaloneRules = @($legacyDetails | Where-Object { $_.SolutionName -eq 'Standalone' })
+        $solutionRules = @($legacyDetails | Where-Object { $_.SolutionName -ne 'Standalone' })
+        $distinctSolutions = @($solutionRules | Select-Object -ExpandProperty SolutionName -Unique)
+        # Build summary: separate solutions from standalone templates
+        $summaryParts = @()
+        if ($distinctSolutions.Count -gt 0) {
+            $summaryParts += "$($distinctSolutions.Count) Content Hub $(if ($distinctSolutions.Count -eq 1) { 'solution covers' } else { 'solutions cover' }) $($solutionRules.Count) $(if ($solutionRules.Count -eq 1) { 'rule' } else { 'rules' })"
+        }
+        if ($standaloneRules.Count -gt 0) {
+            $summaryParts += "$($standaloneRules.Count) $(if ($standaloneRules.Count -eq 1) { 'rule is a standalone template' } else { 'rules are standalone templates' }) that must be installed individually"
+        }
+        $summaryText = ($summaryParts -join '. ') + '.'
+        $legacyTemplateHtml = @"
+<h5 class="mt-4 mb-3" id="legacy-templates"><span class="badge bg-warning text-dark me-2">$($legacyDetails.Count)</span> Legacy Template Rules</h5>
+<p class="text-muted small">These rules were created from built-in alert rule templates that are not managed via Content Hub. They will not receive automatic updates through the Sentinel GUI. Install the corresponding Content Hub solution to migrate each rule to managed updates.</p>
+<p class="text-muted small"><strong>$summaryText</strong></p>
+<table class="table table-hover table-sm report-table" id="legacyTemplatesTable">
+<thead><tr><th>Rule Name</th><th>Kind</th><th>Severity</th><th>Content Hub Solution to Install</th></tr></thead>
+<tbody>
+"@
+        foreach ($rule in $legacyDetails) {
+            $sevBadge = switch ($rule.Severity) {
+                'High'          { '<span class="badge bg-danger">High</span>' }
+                'Medium'        { '<span class="badge bg-warning text-dark">Medium</span>' }
+                'Low'           { '<span class="badge bg-info">Low</span>' }
+                'Informational' { '<span class="badge bg-secondary">Info</span>' }
+                default         { '<span class="badge bg-secondary">-</span>' }
+            }
+            $legacyTemplateHtml += "<tr><td>$([System.Web.HttpUtility]::HtmlEncode($rule.RuleName))</td><td>$([System.Web.HttpUtility]::HtmlEncode($rule.RuleKind))</td><td>$sevBadge</td><td>$([System.Web.HttpUtility]::HtmlEncode($rule.SolutionName))</td></tr>"
+        }
+        $legacyTemplateHtml += "</tbody></table>"
     }
 
     # Build Analytics Health section (from ANAH health checks)
@@ -4431,6 +4617,7 @@ function ConvertTo-ReportHtml {
 <li><a class='nav-link py-1' href='#analytics-rules'>Analytics Rules</a></li>
 <li class='ms-3'><a class='nav-link py-1 small' href='#visibility-gaps'>Visibility Gaps</a></li>
 <li class='ms-3'><a class='nav-link py-1 small' href='#rules-updates'>Pending Updates</a></li>
+<li class='ms-3'><a class='nav-link py-1 small' href='#legacy-templates'>Legacy Templates</a></li>
 <li class='ms-3'><a class='nav-link py-1 small' href='#disabled-rules'>Disabled Rules</a></li>
 <li class='ms-3'><a class='nav-link py-1 small' href='#custom-rules'>Custom Rules</a></li>
 <li class='ms-3'><a class='nav-link py-1 small' href='#incident-volume'>Incident Volume</a></li>
@@ -4572,6 +4759,7 @@ function ConvertTo-ReportHtml {
             $analyticsHtml
             $visibilityGapsHtml
             $rulesWithUpdatesHtml
+            $legacyTemplateHtml
             $disabledRulesHtml
             $customRulesHtml
             $incidentVolumeHtml
@@ -5423,6 +5611,7 @@ $collectedData = @{
     DataConnectors     = @()
     ContentTemplates   = @()
     ContentPackages    = @()
+    ProductTemplates   = @()
     SourceControls     = @()
     WorkspaceManagerConfig = $null
     WorkspaceManagerMembers = @()
@@ -5497,6 +5686,13 @@ try {
     Write-Host "    Retrieved $($collectedData.ContentPackages.Count) content packages" -ForegroundColor Green
 }
 catch { Write-Warning "    Failed to fetch content packages: $_" }
+
+Write-Host "  Fetching product template catalog..." -ForegroundColor DarkGray
+try {
+    $collectedData.ProductTemplates = Get-SentinelProductTemplates -BaseUri $sentinelBaseUri -Headers $authHeader
+    Write-Host "    Retrieved $($collectedData.ProductTemplates.Count) product templates" -ForegroundColor Green
+}
+catch { Write-Warning "    Failed to fetch product templates: $_" }
 
 Write-Host "  Fetching source control connections..." -ForegroundColor DarkGray
 try {
