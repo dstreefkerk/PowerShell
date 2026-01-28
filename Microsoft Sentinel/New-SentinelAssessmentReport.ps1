@@ -2930,7 +2930,7 @@ function ConvertTo-ReportHtml {
     if ($rulesWithUpdatesCheck -and $rulesWithUpdatesCheck.Details -and @($rulesWithUpdatesCheck.Details).Count -gt 0) {
         $rulesWithUpdatesHtml = @"
 <h5 class="mt-4 mb-3" id="rules-updates"><span class="badge bg-info me-2">$(@($rulesWithUpdatesCheck.Details).Count)</span> Rules with Pending Updates</h5>
-<p class="text-muted small">Rules that have newer template versions available in Content Hub.</p>
+<p class="text-muted small">Rules whose template version is behind the latest available version from Content Hub or built-in alert rule templates.</p>
 <table class="table table-hover table-sm report-table" id="rulesUpdatesTable">
 <thead><tr><th>Rule Name</th><th>Current Version</th><th>Available Version</th></tr></thead>
 <tbody>
