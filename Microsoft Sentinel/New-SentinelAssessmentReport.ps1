@@ -1176,7 +1176,7 @@ function Invoke-AllHealthChecks {
     }
 
     # ANA-002: Visibility Gaps (High/Medium severity without incidents)
-    $visibilityGaps = @(Get-VisibilityGaps -Rules $CollectedData.AnalyticsRules -AlertRuleTemplates $CollectedData.AlertRuleTemplates -ContentTemplates $CollectedData.ContentTemplates)
+    $visibilityGaps = @(Get-VisibilityGaps -Rules $CollectedData.AnalyticsRules -AlertRuleTemplates $CollectedData.AlertRuleTemplates -ContentTemplates $CollectedData.ContentTemplates -AlertVolumeByRuleName $CollectedData.AlertVolumeByRuleName)
     $checks += [PSCustomObject]@{
         CheckId     = 'ANA-002'
         CheckName   = 'Visibility Gaps'
@@ -1792,14 +1792,27 @@ function Get-VisibilityGaps {
     <#
     .SYNOPSIS
     Identifies rules where template expects incidents but rule is disabled or not creating incidents.
+    Enriches results with alert volume data from SecurityAlert table when available.
     #>
     param(
         [array]$Rules,
         [array]$AlertRuleTemplates,
-        [array]$ContentTemplates
+        [array]$ContentTemplates,
+        [array]$AlertVolumeByRuleName
     )
 
     $visibilityGaps = @()
+
+    # Build alert volume lookup by rule name
+    $alertVolumeLookup = @{}
+    if ($AlertVolumeByRuleName -and @($AlertVolumeByRuleName).Count -gt 0) {
+        foreach ($entry in $AlertVolumeByRuleName) {
+            $entryName = if ($entry) { $entry.RuleName } else { $null }
+            if ($entryName) {
+                $alertVolumeLookup[$entryName] = $entry
+            }
+        }
+    }
 
     # Build template createIncident lookup
     $templateCreateIncident = @{}
@@ -1844,17 +1857,49 @@ function Get-VisibilityGaps {
         $createIncident = if ($incidentConfig) { Get-SafeProperty $incidentConfig 'createIncident' } else { $true }
 
         if (-not $enabled -or -not $createIncident) {
+            $ruleName = Get-SafeProperty $rule.properties 'displayName'
+            $issue = if (-not $enabled) { 'Disabled' } else { 'Not Creating Incidents' }
+
+            # Enrich with alert volume data (only meaningful for enabled rules not creating incidents)
+            $alertCount90d = 0
+            $alertHigh = 0
+            $alertMedium = 0
+            $alertLow = 0
+            $alertInfo = 0
+            $firstAlert = $null
+            $lastAlert = $null
+            if ($enabled -and -not $createIncident -and $ruleName -and $alertVolumeLookup.Count -gt 0 -and $alertVolumeLookup.ContainsKey($ruleName)) {
+                $vol = $alertVolumeLookup[$ruleName]
+                if ($vol) {
+                    $alertCount90d = if ($vol.AlertCount) { [int]$vol.AlertCount } else { 0 }
+                    $alertHigh = if ($vol.HighCount) { [int]$vol.HighCount } else { 0 }
+                    $alertMedium = if ($vol.MediumCount) { [int]$vol.MediumCount } else { 0 }
+                    $alertLow = if ($vol.LowCount) { [int]$vol.LowCount } else { 0 }
+                    $alertInfo = if ($vol.InfoCount) { [int]$vol.InfoCount } else { 0 }
+                    $firstAlert = if ($vol.FirstAlert) { "$($vol.FirstAlert)" } else { $null }
+                    $lastAlert = if ($vol.LastAlert) { "$($vol.LastAlert)" } else { $null }
+                }
+            }
+
             $visibilityGaps += [PSCustomObject]@{
-                RuleName       = Get-SafeProperty $rule.properties 'displayName'
+                RuleName       = $ruleName
                 Severity       = $severity
                 Enabled        = $enabled
                 CreateIncident = $createIncident
-                Issue          = if (-not $enabled) { 'Disabled' } else { 'Not Creating Incidents' }
+                Issue          = $issue
+                AlertCount90d  = $alertCount90d
+                AlertHigh      = $alertHigh
+                AlertMedium    = $alertMedium
+                AlertLow       = $alertLow
+                AlertInfo      = $alertInfo
+                FirstAlert     = $firstAlert
+                LastAlert      = $lastAlert
             }
         }
     }
 
-    return ,$visibilityGaps
+    # Output items individually to avoid array-wrapping issues with @() caller
+    foreach ($gap in $visibilityGaps) { $gap }
 }
 
 #endregion Health Check Functions
@@ -2702,11 +2747,15 @@ function ConvertTo-ReportHtml {
         $visibilityGapsHtml = @"
 <h5 class="mt-4 mb-3" id="visibility-gaps"><span class="badge bg-warning text-dark me-2">$(@($visibilityGapsCheck.Details).Count)</span> Visibility Gaps</h5>
 <p class="text-muted small">Rules where the template expects incident creation, but the rule is disabled or not creating incidents.</p>
-<table class="table table-hover table-sm report-table" id="visibilityGapsTable">
-<thead><tr><th>Rule Name</th><th>Severity</th><th>Enabled</th><th>Issue</th></tr></thead>
+<table class="table table-hover table-sm report-table flyout-enabled" id="visibilityGapsTable">
+<thead><tr><th>Rule Name</th><th>Severity</th><th>Enabled</th><th>Issue</th><th>Alerts (90d)</th><th class="col-flyout-icon"></th></tr></thead>
 <tbody>
 "@
+        $visibilityGapsFlyoutData = @{}
+        $gapIndex = 0
         foreach ($gap in $visibilityGapsCheck.Details) {
+            $gapKey = "gap-$gapIndex"
+            $gapIndex++
             $sevBadge = switch ($gap.Severity) {
                 'High'   { '<span class="badge bg-danger">High</span>' }
                 'Medium' { '<span class="badge bg-warning text-dark">Medium</span>' }
@@ -2714,9 +2763,74 @@ function ConvertTo-ReportHtml {
                 default  { '<span class="badge bg-secondary">-</span>' }
             }
             $enabledBadge = if ($gap.Enabled) { '<span class="badge bg-success">Yes</span>' } else { '<span class="badge bg-danger">No</span>' }
-            $visibilityGapsHtml += "<tr><td>$([System.Web.HttpUtility]::HtmlEncode($gap.RuleName))</td><td>$sevBadge</td><td>$enabledBadge</td><td>$($gap.Issue)</td></tr>"
+
+            # Alert count badge (only for enabled rules not creating incidents)
+            $alertCount = if ($gap.AlertCount90d) { [int]$gap.AlertCount90d } else { 0 }
+            $alertCountBadge = if ($gap.Issue -eq 'Not Creating Incidents' -and $alertCount -gt 0) {
+                '<span class="badge bg-danger">' + $alertCount + '</span>'
+            } elseif ($gap.Issue -eq 'Not Creating Incidents') {
+                '<span class="badge bg-secondary">0</span>'
+            } else {
+                '<span class="text-muted small">N/A</span>'
+            }
+
+            $chevronTd = '<td class="col-flyout-icon"><i data-lucide="chevron-right" style="width:16px;height:16px;color:#94a3b8"></i></td>'
+            $ruleNameEncoded = if ($gap.RuleName) { [System.Web.HttpUtility]::HtmlEncode($gap.RuleName) } else { '(unknown)' }
+            $alertSortOrder = if ($gap.Issue -eq 'Not Creating Incidents') { $alertCount } else { -1 }
+            $visibilityGapsHtml += "<tr data-flyout-id=`"$gapKey`"><td>$ruleNameEncoded</td><td>$sevBadge</td><td>$enabledBadge</td><td>$($gap.Issue)</td><td data-order=`"$alertSortOrder`">$alertCountBadge</td>$chevronTd</tr>"
+
+            # Build flyout detail HTML for this gap
+            $flyoutHtml = '<dl class="row mb-0">'
+            $flyoutHtml += "<dt class=`"col-sm-5`">Rule Name</dt><dd class=`"col-sm-7`">$ruleNameEncoded</dd>"
+            $flyoutHtml += "<dt class=`"col-sm-5`">Severity</dt><dd class=`"col-sm-7`">$sevBadge</dd>"
+            $flyoutHtml += "<dt class=`"col-sm-5`">Enabled</dt><dd class=`"col-sm-7`">$enabledBadge</dd>"
+            $flyoutHtml += "<dt class=`"col-sm-5`">Issue</dt><dd class=`"col-sm-7`">$($gap.Issue)</dd>"
+            $flyoutHtml += '</dl>'
+
+            if ($gap.Issue -eq 'Not Creating Incidents') {
+                $flyoutHtml += '<hr><span class="text-muted small text-uppercase fw-bold">Alert Activity (Past 90 Days)</span>'
+                if ($alertCount -gt 0) {
+                    $flyoutHtml += "<div class=`"mt-2 mb-2`"><span class=`"badge bg-danger fs-6`">$alertCount</span> <span class=`"text-muted`">orphaned alerts generated</span></div>"
+                    $flyoutHtml += '<p class="text-muted small">This rule is actively generating alerts that are not being promoted to incidents. These alerts are only visible in the SecurityAlert table and may represent unreviewed security detections.</p>'
+                    $flyoutHtml += '<div class="table-responsive mt-2"><table class="table table-sm table-bordered flyout-detail-table mb-0">'
+                    $flyoutHtml += '<thead><tr><th>Alert Severity</th><th>Count</th></tr></thead><tbody>'
+                    $aHigh = if ($gap.AlertHigh) { [int]$gap.AlertHigh } else { 0 }
+                    $aMedium = if ($gap.AlertMedium) { [int]$gap.AlertMedium } else { 0 }
+                    $aLow = if ($gap.AlertLow) { [int]$gap.AlertLow } else { 0 }
+                    $aInfo = if ($gap.AlertInfo) { [int]$gap.AlertInfo } else { 0 }
+                    if ($aHigh -gt 0) { $flyoutHtml += "<tr><td><span class=`"badge bg-danger`">High</span></td><td>$aHigh</td></tr>" }
+                    if ($aMedium -gt 0) { $flyoutHtml += "<tr><td><span class=`"badge bg-warning text-dark`">Medium</span></td><td>$aMedium</td></tr>" }
+                    if ($aLow -gt 0) { $flyoutHtml += "<tr><td><span class=`"badge bg-info`">Low</span></td><td>$aLow</td></tr>" }
+                    if ($aInfo -gt 0) { $flyoutHtml += "<tr><td><span class=`"badge bg-secondary`">Informational</span></td><td>$aInfo</td></tr>" }
+                    $flyoutHtml += '</tbody></table></div>'
+                    if ($gap.FirstAlert) {
+                        $flyoutHtml += '<dl class="row mb-0 mt-2">'
+                        $flyoutHtml += "<dt class=`"col-sm-5`">First Alert</dt><dd class=`"col-sm-7`">$([System.Web.HttpUtility]::HtmlEncode("$($gap.FirstAlert)"))</dd>"
+                        $flyoutHtml += "<dt class=`"col-sm-5`">Last Alert</dt><dd class=`"col-sm-7`">$([System.Web.HttpUtility]::HtmlEncode("$($gap.LastAlert)"))</dd>"
+                        $flyoutHtml += '</dl>'
+                    }
+                } else {
+                    $flyoutHtml += '<div class="mt-2"><span class="badge bg-secondary">0</span> <span class="text-muted">alerts in the past 90 days</span></div>'
+                    $flyoutHtml += '<p class="text-muted small mt-1">This rule has incident creation disabled but has not generated any alerts recently.</p>'
+                }
+            } else {
+                $flyoutHtml += '<hr><span class="text-muted small text-uppercase fw-bold">Alert Activity</span>'
+                $flyoutHtml += '<p class="text-muted small mt-2">This rule is disabled and cannot generate alerts. Enable the rule to begin detecting threats.</p>'
+            }
+
+            $gapRuleNameEncoded = if ($gap.RuleName) { [System.Web.HttpUtility]::HtmlEncode($gap.RuleName) } else { '(unknown)' }
+            $visibilityGapsFlyoutData[$gapKey] = @{
+                checkId     = 'ANA-002'
+                checkName   = $gapRuleNameEncoded
+                category    = 'Visibility Gap'
+                status      = if ($gap.Issue -eq 'Not Creating Incidents' -and $alertCount -gt 0) { 'Critical' } else { 'Warning' }
+                description = if ($gap.Issue) { $gap.Issue } else { 'Unknown' }
+                detailsHtml = $flyoutHtml
+            }
         }
         $visibilityGapsHtml += "</tbody></table>"
+        $visibilityGapsFlyoutJson = ($visibilityGapsFlyoutData | ConvertTo-Json -Depth 10 -Compress) -replace '</', '<\/'
+        $visibilityGapsHtml += "`n<script type=`"application/json`" id=`"visibilityGapsTableFlyoutData`">$visibilityGapsFlyoutJson</script>"
     }
 
     # Build Disabled Rules table (from health check ANA-005)
@@ -5095,6 +5209,12 @@ $datasetsJsStr
           options.order = [[4, 'desc']];
         }
 
+        // Sort visibility gaps table by Alerts 90d (column 4) descending
+        if (tableId === 'visibilityGapsTable') {
+          options.order = [[4, 'desc']];
+          options.columnDefs = [{ targets: -1, orderable: false, searchable: false }];
+        }
+
         // Data Collection Health tables: 10 items per page, sorted by Time Since Last Event (oldest first)
         var dataCollectionHealthTables = ['staleTablesTable', 'syslogByComputerTable', 'cefByComputerTable', 'securityEventByComputerTable'];
         if (dataCollectionHealthTables.includes(tableId)) {
@@ -5313,6 +5433,7 @@ $collectedData = @{
     AnalyticsExecutionDelays = $null
     AnalyticsAutoDisabled    = $null
     IncidentVolumeByRule     = $null
+    AlertVolumeByRuleName    = $null
     # Agent Health (from Heartbeat and Operation tables)
     AgentHealthSummary       = $null
     AgentOperationErrors     = $null
@@ -5521,6 +5642,29 @@ SecurityAlert
         $collectedData.AlertTrend = Invoke-SentinelKqlQuery -WorkspaceId $workspaceId -Query $alertTrendQuery
         if ($collectedData.AlertTrend) {
             Write-Host "    Alert trend: $($collectedData.AlertTrend.Count) data points" -ForegroundColor Green
+        }
+
+        # Alert volume by rule name (90d) - used for visibility gaps enrichment
+        $alertVolumeByRuleQuery = @"
+SecurityAlert
+| where TimeGenerated > ago(90d)
+| where ProviderName in ("ASI Scheduled Alerts", "ASI NRT Alerts")
+| extend RuleName = extract(@'"Analytic Rule Name":"([^"]+)"', 1, tostring(ExtendedProperties))
+| where isnotempty(RuleName)
+| summarize
+    AlertCount = count(),
+    HighCount = countif(AlertSeverity == "High"),
+    MediumCount = countif(AlertSeverity == "Medium"),
+    LowCount = countif(AlertSeverity == "Low"),
+    InfoCount = countif(AlertSeverity == "Informational"),
+    FirstAlert = min(TimeGenerated),
+    LastAlert = max(TimeGenerated)
+    by RuleName
+| order by AlertCount desc
+"@
+        $collectedData.AlertVolumeByRuleName = Invoke-SentinelKqlQuery -WorkspaceId $workspaceId -Query $alertVolumeByRuleQuery
+        if ($collectedData.AlertVolumeByRuleName -and @($collectedData.AlertVolumeByRuleName).Count -gt 0) {
+            Write-Host "    Alert volume by rule: $(@($collectedData.AlertVolumeByRuleName).Count) rules with alerts" -ForegroundColor Green
         }
 
         # Events by table over time (7 days, top 9 + Other) - using daily buckets for performance
