@@ -502,14 +502,22 @@ function Get-SentinelAlertRuleTemplates {
 
     $uri = "$BaseUri/alertRuleTemplates?api-version=$ApiVersion"
     $allTemplates = @()
+    $pageCount = 0
 
     do {
+        $pageCount++
         $response = Invoke-RestMethodWithRetry -Uri $uri -Method 'GET' -Headers $Headers
         if ($response.value) {
             $allTemplates += $response.value
+            Write-Verbose "    Alert rule templates page $pageCount returned $($response.value.Count) items (running total: $($allTemplates.Count))"
         }
-        $uri = if ($response.PSObject.Properties['nextLink']) { $response.nextLink } else { $null }
+        $hasNextLink = $response.PSObject.Properties['nextLink'] -and $response.nextLink
+        $uri = if ($hasNextLink) { $response.nextLink } else { $null }
     } while ($uri)
+
+    if ($pageCount -eq 1 -and $allTemplates.Count -ge 500) {
+        Write-Warning "    Alert rule templates returned exactly $($allTemplates.Count) items in a single page - this is a known API pagination cap. ProductTemplates will be used to supplement coverage."
+    }
 
     return ,$allTemplates
 }
@@ -1206,7 +1214,7 @@ function Invoke-AllHealthChecks {
     }
 
     # ANA-002: Visibility Gaps (High/Medium severity without incidents)
-    $visibilityGaps = @(Get-VisibilityGaps -Rules $CollectedData.AnalyticsRules -AlertRuleTemplates $CollectedData.AlertRuleTemplates -ContentTemplates $CollectedData.ContentTemplates -AlertVolumeByRuleName $CollectedData.AlertVolumeByRuleName)
+    $visibilityGaps = @(Get-VisibilityGaps -Rules $CollectedData.AnalyticsRules -AlertRuleTemplates $CollectedData.AlertRuleTemplates -ContentTemplates $CollectedData.ContentTemplates -ProductTemplates $CollectedData.ProductTemplates -AlertVolumeByRuleName $CollectedData.AlertVolumeByRuleName)
     $checks += [PSCustomObject]@{
         CheckId     = 'ANA-002'
         CheckName   = 'Visibility Gaps'
@@ -1912,15 +1920,19 @@ function Get-RulesWithUpdates {
         }
     }
 
-    # Product catalog lookup: contentId -> solution name (from source.name)
+    # Product catalog lookup: contentId -> { Version; SolutionName }
     $productCatalogLookup = @{}
     foreach ($pt in $ProductTemplates) {
         $contentId = Get-SafeProperty $pt.properties 'contentId'
+        $ver = Get-SafeProperty $pt.properties 'version'
         $sourceName = $null
         $source = Get-SafeProperty $pt.properties 'source'
         if ($source) { $sourceName = Get-SafeProperty $source 'name' }
-        if ($contentId -and $sourceName) {
-            $productCatalogLookup[$contentId] = $sourceName
+        if ($contentId) {
+            $productCatalogLookup[$contentId] = @{
+                Version      = $ver
+                SolutionName = if ($sourceName) { $sourceName } else { 'Unknown solution' }
+            }
         }
     }
 
@@ -1937,10 +1949,14 @@ function Get-RulesWithUpdates {
                 $templateVersion = $contentHubTemplates[$templateName].Version
                 $updateSource = "Content Hub: $($contentHubTemplates[$templateName].PackageName)"
             }
+            elseif ($productCatalogLookup.ContainsKey($templateName) -and $productCatalogLookup[$templateName].Version) {
+                $templateVersion = $productCatalogLookup[$templateName].Version
+                $updateSource = "Product catalog: $($productCatalogLookup[$templateName].SolutionName) (install from Content Hub)"
+            }
             elseif ($builtInTemplates.ContainsKey($templateName)) {
                 $templateVersion = $builtInTemplates[$templateName]
                 if ($productCatalogLookup.ContainsKey($templateName)) {
-                    $updateSource = "Built-in template (install '$($productCatalogLookup[$templateName])' from Content Hub)"
+                    $updateSource = "Built-in template (install '$($productCatalogLookup[$templateName].SolutionName)' from Content Hub)"
                 } else {
                     $updateSource = 'Built-in template'
                 }
@@ -1996,10 +2012,17 @@ function Get-LegacyTemplateRules {
         }
     }
 
-    # 2. Build set of built-in template GUIDs
+    # 2. Build set of known template GUIDs (from both legacy API and product catalog)
     $builtInTemplateIds = @{}
     foreach ($t in $AlertRuleTemplates) {
         $builtInTemplateIds[$t.name] = $true
+    }
+    # Supplement with product catalog to cover templates beyond the legacy API's 500-item cap
+    foreach ($pt in $ProductTemplates) {
+        $contentId = Get-SafeProperty $pt.properties 'contentId'
+        if ($contentId -and -not $builtInTemplateIds.ContainsKey($contentId)) {
+            $builtInTemplateIds[$contentId] = $true
+        }
     }
 
     # 3. Build catalog lookup: contentId -> { SolutionName, PackageId }
@@ -2076,6 +2099,7 @@ function Get-VisibilityGaps {
         [array]$Rules,
         [array]$AlertRuleTemplates,
         [array]$ContentTemplates,
+        [array]$ProductTemplates,
         [array]$AlertVolumeByRuleName
     )
 
@@ -2116,6 +2140,14 @@ function Get-VisibilityGaps {
             $incidentConfig = Get-SafeProperty $template.properties 'incidentConfiguration'
             $createIncident = if ($incidentConfig) { Get-SafeProperty $incidentConfig 'createIncident' } else { $true }
             $templateCreateIncident[$template.name] = $createIncident
+        }
+    }
+
+    # From product catalog (safe default: most templates expect incident creation)
+    foreach ($pt in $ProductTemplates) {
+        $contentId = Get-SafeProperty $pt.properties 'contentId'
+        if ($contentId -and -not $templateCreateIncident.ContainsKey($contentId)) {
+            $templateCreateIncident[$contentId] = $true
         }
     }
 
