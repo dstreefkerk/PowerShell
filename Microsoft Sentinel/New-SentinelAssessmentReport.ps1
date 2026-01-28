@@ -3361,11 +3361,15 @@ function ConvertTo-ReportHtml {
 
             $analyticsHealthHtml += @"
 <h6 class="mt-4 mb-2">Failure Reasons</h6>
-<table class="table table-hover table-sm report-table" id="failureReasonsTable">
-<thead><tr><th>Reason</th><th>Failures</th><th>Affected Rules</th><th>Remediation</th></tr></thead>
+<table class="table table-hover table-sm report-table flyout-enabled" id="failureReasonsTable">
+<thead><tr><th>Reason</th><th>Failures</th><th>Affected Rules</th><th>Remediation</th><th class="col-flyout-icon"></th></tr></thead>
 <tbody>
 "@
+            $failureReasonsFlyoutData = @{}
+            $reasonIndex = 0
             foreach ($reason in $Data.AnalyticsFailureReasons) {
+                $reasonKey = "reason-$reasonIndex"
+                $reasonIndex++
                 $reasonText = $reason.Reason
                 # Find matching remediation
                 $remediation = 'Review rule configuration'
@@ -3375,20 +3379,69 @@ function ConvertTo-ReportHtml {
                         break
                     }
                 }
-                $analyticsHealthHtml += "<tr><td>$([System.Web.HttpUtility]::HtmlEncode($reasonText))</td><td><span class='badge bg-danger'>$($reason.FailureCount)</span></td><td>$($reason.AffectedRules)</td><td><small class='text-muted'>$remediation</small></td></tr>"
+                $reasonEncoded = [System.Web.HttpUtility]::HtmlEncode($reasonText)
+                $chevronTd = '<td class="col-flyout-icon"><i data-lucide="chevron-right" style="width:16px;height:16px;color:#94a3b8"></i></td>'
+                $analyticsHealthHtml += "<tr data-flyout-id=`"$reasonKey`"><td>$reasonEncoded</td><td><span class='badge bg-danger'>$($reason.FailureCount)</span></td><td>$($reason.AffectedRules)</td><td><small class='text-muted'>$remediation</small></td>$chevronTd</tr>"
+
+                # Build flyout detail HTML
+                $flyoutHtml = '<dl class="row mb-0">'
+                $flyoutHtml += "<dt class=`"col-sm-5`">Failure Reason</dt><dd class=`"col-sm-7`">$reasonEncoded</dd>"
+                $flyoutHtml += "<dt class=`"col-sm-5`">Total Failures</dt><dd class=`"col-sm-7`"><span class=`"badge bg-danger`">$($reason.FailureCount)</span></dd>"
+                $flyoutHtml += "<dt class=`"col-sm-5`">Affected Rules</dt><dd class=`"col-sm-7`">$($reason.AffectedRules)</dd>"
+                $flyoutHtml += "<dt class=`"col-sm-5`">Remediation</dt><dd class=`"col-sm-7`">$remediation</dd>"
+                $flyoutHtml += '</dl>'
+
+                # Affected rule names list
+                $ruleNames = @()
+                if ($reason.AffectedRuleNames) {
+                    if ($reason.AffectedRuleNames -is [string]) {
+                        try { $ruleNames = @($reason.AffectedRuleNames | ConvertFrom-Json) } catch { $ruleNames = @($reason.AffectedRuleNames) }
+                    } else {
+                        $ruleNames = @($reason.AffectedRuleNames)
+                    }
+                }
+                if ($ruleNames.Count -gt 0) {
+                    $flyoutHtml += '<hr><span class="text-muted small text-uppercase fw-bold">Affected Rules</span>'
+                    $flyoutHtml += '<div class="table-responsive mt-2"><table class="table table-sm table-bordered flyout-detail-table mb-0">'
+                    $flyoutHtml += '<thead><tr><th>#</th><th>Rule Name</th></tr></thead><tbody>'
+                    $ruleNum = 0
+                    foreach ($ruleName in $ruleNames) {
+                        $ruleNum++
+                        $flyoutHtml += "<tr><td>$ruleNum</td><td>$([System.Web.HttpUtility]::HtmlEncode($ruleName))</td></tr>"
+                    }
+                    $flyoutHtml += '</tbody></table></div>'
+                    if ($ruleNames.Count -ge 100) {
+                        $flyoutHtml += '<p class="text-muted small mt-1"><em>List truncated to first 100 rules.</em></p>'
+                    }
+                }
+
+                $failureReasonsFlyoutData[$reasonKey] = @{
+                    checkId     = 'HEALTH'
+                    checkName   = $reasonEncoded
+                    category    = 'Failure Reason'
+                    status      = 'Critical'
+                    description = "This failure reason affected $($reason.AffectedRules) rule(s) with $($reason.FailureCount) total failure(s)."
+                    detailsHtml = $flyoutHtml
+                }
             }
             $analyticsHealthHtml += "</tbody></table>"
+            $failureReasonsFlyoutJson = ($failureReasonsFlyoutData | ConvertTo-Json -Depth 10 -Compress) -replace '</', '<\/'
+            $analyticsHealthHtml += "`n<script type=`"application/json`" id=`"failureReasonsTableFlyoutData`">$failureReasonsFlyoutJson</script>"
         }
 
         # Problematic Rules table (rules with failures)
         if ($rulesWithFailures.Count -gt 0) {
             $analyticsHealthHtml += @"
 <h6 class="mt-4 mb-2">Rules with Failures</h6>
-<table class="table table-hover table-sm report-table" id="problematicRulesTable">
-<thead><tr><th>Rule Name</th><th>Type</th><th>Total Executions</th><th>Failures</th><th>Failure Rate</th></tr></thead>
+<table class="table table-hover table-sm report-table flyout-enabled" id="problematicRulesTable">
+<thead><tr><th>Rule Name</th><th>Type</th><th>Total Executions</th><th>Failures</th><th>Failure Rate</th><th class="col-flyout-icon"></th></tr></thead>
 <tbody>
 "@
+            $problematicRulesFlyoutData = @{}
+            $probIndex = 0
             foreach ($rule in ($rulesWithFailures | Sort-Object FailureRate -Descending)) {
+                $probKey = "probrule-$probIndex"
+                $probIndex++
                 $rateBadge = if ($rule.FailureRate -gt 50) {
                     '<span class="badge bg-danger">' + $rule.FailureRate + '%</span>'
                 } elseif ($rule.FailureRate -gt 20) {
@@ -3401,9 +3454,44 @@ function ConvertTo-ReportHtml {
                 } else {
                     '<span class="badge bg-secondary">Scheduled</span>'
                 }
-                $analyticsHealthHtml += "<tr><td>$([System.Web.HttpUtility]::HtmlEncode($rule.SentinelResourceName))</td><td>$typeBadge</td><td>$($rule.TotalExecutions)</td><td><span class='badge bg-danger'>$($rule.FailureCount)</span></td><td>$rateBadge</td></tr>"
+                $ruleNameEncoded = [System.Web.HttpUtility]::HtmlEncode($rule.SentinelResourceName)
+                $chevronTd = '<td class="col-flyout-icon"><i data-lucide="chevron-right" style="width:16px;height:16px;color:#94a3b8"></i></td>'
+                $analyticsHealthHtml += "<tr data-flyout-id=`"$probKey`"><td>$ruleNameEncoded</td><td>$typeBadge</td><td>$($rule.TotalExecutions)</td><td><span class='badge bg-danger'>$($rule.FailureCount)</span></td><td>$rateBadge</td>$chevronTd</tr>"
+
+                # Build flyout detail HTML
+                $successCount = [int]$rule.TotalExecutions - [int]$rule.FailureCount
+                $successPct = if ([int]$rule.TotalExecutions -gt 0) { [math]::Round(($successCount / [int]$rule.TotalExecutions) * 100, 1) } else { 0 }
+                $failPct = if ([int]$rule.TotalExecutions -gt 0) { [math]::Round(([int]$rule.FailureCount / [int]$rule.TotalExecutions) * 100, 1) } else { 0 }
+
+                $flyoutHtml = '<dl class="row mb-0">'
+                $flyoutHtml += "<dt class=`"col-sm-5`">Rule Name</dt><dd class=`"col-sm-7`">$ruleNameEncoded</dd>"
+                $flyoutHtml += "<dt class=`"col-sm-5`">Type</dt><dd class=`"col-sm-7`">$typeBadge</dd>"
+                $flyoutHtml += "<dt class=`"col-sm-5`">Total Executions</dt><dd class=`"col-sm-7`">$($rule.TotalExecutions)</dd>"
+                $flyoutHtml += "<dt class=`"col-sm-5`">Successes</dt><dd class=`"col-sm-7`"><span class=`"badge bg-success`">$successCount</span></dd>"
+                $flyoutHtml += "<dt class=`"col-sm-5`">Failures</dt><dd class=`"col-sm-7`"><span class=`"badge bg-danger`">$($rule.FailureCount)</span></dd>"
+                $flyoutHtml += "<dt class=`"col-sm-5`">Failure Rate</dt><dd class=`"col-sm-7`">$rateBadge</dd>"
+                $flyoutHtml += '</dl>'
+
+                # Progress bar showing success/failure ratio
+                $flyoutHtml += '<hr><span class="text-muted small text-uppercase fw-bold">Execution Health</span>'
+                $flyoutHtml += "<div class=`"progress mt-2`" style=`"height: 20px;`">"
+                $flyoutHtml += "<div class=`"progress-bar bg-success`" role=`"progressbar`" style=`"width: $successPct%`" aria-valuenow=`"$successPct`" aria-valuemin=`"0`" aria-valuemax=`"100`">$successPct% OK</div>"
+                $flyoutHtml += "<div class=`"progress-bar bg-danger`" role=`"progressbar`" style=`"width: $failPct%`" aria-valuenow=`"$failPct`" aria-valuemin=`"0`" aria-valuemax=`"100`">$failPct% Fail</div>"
+                $flyoutHtml += '</div>'
+
+                $probStatus = if ($rule.FailureRate -gt 50) { 'Critical' } elseif ($rule.FailureRate -gt 20) { 'Warning' } else { 'Info' }
+                $problematicRulesFlyoutData[$probKey] = @{
+                    checkId     = 'HEALTH'
+                    checkName   = $ruleNameEncoded
+                    category    = 'Rule Failures'
+                    status      = $probStatus
+                    description = "This rule has a $($rule.FailureRate)% failure rate ($($rule.FailureCount) failures out of $($rule.TotalExecutions) executions)."
+                    detailsHtml = $flyoutHtml
+                }
             }
             $analyticsHealthHtml += "</tbody></table>"
+            $problematicRulesFlyoutJson = ($problematicRulesFlyoutData | ConvertTo-Json -Depth 10 -Compress) -replace '</', '<\/'
+            $analyticsHealthHtml += "`n<script type=`"application/json`" id=`"problematicRulesTableFlyoutData`">$problematicRulesFlyoutJson</script>"
         }
 
         # Skipped Windows table
@@ -3411,14 +3499,48 @@ function ConvertTo-ReportHtml {
             $analyticsHealthHtml += @"
 <h6 class="mt-4 mb-2"><span class="badge bg-danger me-2">Critical</span> Skipped Query Windows</h6>
 <p class="text-muted small">Rules where all 6 retry attempts failed, resulting in detection gaps.</p>
-<table class="table table-hover table-sm report-table" id="skippedWindowsTable">
-<thead><tr><th>Rule Name</th><th>Skipped Windows</th></tr></thead>
+<table class="table table-hover table-sm report-table flyout-enabled" id="skippedWindowsTable">
+<thead><tr><th>Rule Name</th><th>Skipped Windows</th><th class="col-flyout-icon"></th></tr></thead>
 <tbody>
 "@
+            $skippedWindowsFlyoutData = @{}
+            $skipIndex = 0
             foreach ($rule in $Data.AnalyticsSkippedWindows) {
-                $analyticsHealthHtml += "<tr><td>$([System.Web.HttpUtility]::HtmlEncode($rule.SentinelResourceName))</td><td><span class='badge bg-danger'>$($rule.SkippedWindows)</span></td></tr>"
+                $skipKey = "skip-$skipIndex"
+                $skipIndex++
+                $ruleNameEncoded = [System.Web.HttpUtility]::HtmlEncode($rule.SentinelResourceName)
+                $chevronTd = '<td class="col-flyout-icon"><i data-lucide="chevron-right" style="width:16px;height:16px;color:#94a3b8"></i></td>'
+                $analyticsHealthHtml += "<tr data-flyout-id=`"$skipKey`"><td>$ruleNameEncoded</td><td><span class='badge bg-danger'>$($rule.SkippedWindows)</span></td>$chevronTd</tr>"
+
+                # Build flyout detail HTML
+                $flyoutHtml = '<dl class="row mb-0">'
+                $flyoutHtml += "<dt class=`"col-sm-5`">Rule Name</dt><dd class=`"col-sm-7`">$ruleNameEncoded</dd>"
+                $flyoutHtml += "<dt class=`"col-sm-5`">Skipped Windows</dt><dd class=`"col-sm-7`"><span class=`"badge bg-danger`">$($rule.SkippedWindows)</span></dd>"
+                $flyoutHtml += '</dl>'
+
+                $flyoutHtml += '<hr><span class="text-muted small text-uppercase fw-bold">Impact</span>'
+                $flyoutHtml += "<p class=`"text-muted small mt-2`">This rule has <strong>$($rule.SkippedWindows)</strong> skipped query window(s) in the past 7 days. Each skipped window means all 6 retry attempts failed, resulting in a gap where threats would not be detected by this rule.</p>"
+
+                $flyoutHtml += '<hr><span class="text-muted small text-uppercase fw-bold">Recommended Actions</span>'
+                $flyoutHtml += '<ul class="text-muted small mt-2 mb-0">'
+                $flyoutHtml += '<li>Review the rule query for errors or timeouts</li>'
+                $flyoutHtml += '<li>Check that required data sources are ingesting properly</li>'
+                $flyoutHtml += '<li>Optimize the KQL query to reduce execution time</li>'
+                $flyoutHtml += '<li>Consider reducing the query lookback period</li>'
+                $flyoutHtml += '</ul>'
+
+                $skippedWindowsFlyoutData[$skipKey] = @{
+                    checkId     = 'HEALTH'
+                    checkName   = $ruleNameEncoded
+                    category    = 'Skipped Windows'
+                    status      = 'Critical'
+                    description = "This rule has $($rule.SkippedWindows) skipped query window(s) where all retry attempts failed."
+                    detailsHtml = $flyoutHtml
+                }
             }
             $analyticsHealthHtml += "</tbody></table>"
+            $skippedWindowsFlyoutJson = ($skippedWindowsFlyoutData | ConvertTo-Json -Depth 10 -Compress) -replace '</', '<\/'
+            $analyticsHealthHtml += "`n<script type=`"application/json`" id=`"skippedWindowsTableFlyoutData`">$skippedWindowsFlyoutJson</script>"
         }
 
         # Execution Delays table
@@ -3426,14 +3548,51 @@ function ConvertTo-ReportHtml {
             $analyticsHealthHtml += @"
 <h6 class="mt-4 mb-2">Execution Delays</h6>
 <p class="text-muted small">Scheduled rules with average execution delays exceeding 5 minutes.</p>
-<table class="table table-hover table-sm report-table" id="executionDelaysTable">
-<thead><tr><th>Rule Name</th><th>Avg Delay (min)</th><th>Max Delay (min)</th><th>Delayed Executions</th></tr></thead>
+<table class="table table-hover table-sm report-table flyout-enabled" id="executionDelaysTable">
+<thead><tr><th>Rule Name</th><th>Avg Delay (min)</th><th>Max Delay (min)</th><th>Delayed Executions</th><th class="col-flyout-icon"></th></tr></thead>
 <tbody>
 "@
+            $executionDelaysFlyoutData = @{}
+            $delayIndex = 0
             foreach ($rule in ($Data.AnalyticsExecutionDelays | Sort-Object AvgDelay -Descending)) {
-                $analyticsHealthHtml += "<tr><td>$([System.Web.HttpUtility]::HtmlEncode($rule.SentinelResourceName))</td><td>$($rule.AvgDelay)</td><td>$($rule.MaxDelay)</td><td>$($rule.DelayedExecutions)</td></tr>"
+                $delayKey = "delay-$delayIndex"
+                $delayIndex++
+                $ruleNameEncoded = [System.Web.HttpUtility]::HtmlEncode($rule.SentinelResourceName)
+                $chevronTd = '<td class="col-flyout-icon"><i data-lucide="chevron-right" style="width:16px;height:16px;color:#94a3b8"></i></td>'
+                $analyticsHealthHtml += "<tr data-flyout-id=`"$delayKey`"><td>$ruleNameEncoded</td><td>$($rule.AvgDelay)</td><td>$($rule.MaxDelay)</td><td>$($rule.DelayedExecutions)</td>$chevronTd</tr>"
+
+                # Build flyout detail HTML
+                $flyoutHtml = '<dl class="row mb-0">'
+                $flyoutHtml += "<dt class=`"col-sm-5`">Rule Name</dt><dd class=`"col-sm-7`">$ruleNameEncoded</dd>"
+                $flyoutHtml += "<dt class=`"col-sm-5`">Avg Delay</dt><dd class=`"col-sm-7`">$($rule.AvgDelay) minutes</dd>"
+                $flyoutHtml += "<dt class=`"col-sm-5`">Max Delay</dt><dd class=`"col-sm-7`">$($rule.MaxDelay) minutes</dd>"
+                $flyoutHtml += "<dt class=`"col-sm-5`">Delayed Executions</dt><dd class=`"col-sm-7`">$($rule.DelayedExecutions)</dd>"
+                $flyoutHtml += '</dl>'
+
+                $flyoutHtml += '<hr><span class="text-muted small text-uppercase fw-bold">Impact</span>'
+                $flyoutHtml += "<p class=`"text-muted small mt-2`">This rule has an average execution delay of <strong>$($rule.AvgDelay) minutes</strong> (max <strong>$($rule.MaxDelay) minutes</strong>) across <strong>$($rule.DelayedExecutions)</strong> delayed execution(s). Delays reduce detection timeliness and may allow threats to go undetected for longer periods.</p>"
+
+                $flyoutHtml += '<hr><span class="text-muted small text-uppercase fw-bold">Recommended Actions</span>'
+                $flyoutHtml += '<ul class="text-muted small mt-2 mb-0">'
+                $flyoutHtml += '<li>Optimize the rule query to reduce execution time</li>'
+                $flyoutHtml += '<li>Check workspace query concurrency limits</li>'
+                $flyoutHtml += '<li>Review ingestion delay on source data tables</li>'
+                $flyoutHtml += '<li>Consider staggering rule execution schedules</li>'
+                $flyoutHtml += '</ul>'
+
+                $delayStatus = if ([double]$rule.AvgDelay -gt 15) { 'Critical' } elseif ([double]$rule.AvgDelay -gt 10) { 'Warning' } else { 'Info' }
+                $executionDelaysFlyoutData[$delayKey] = @{
+                    checkId     = 'HEALTH'
+                    checkName   = $ruleNameEncoded
+                    category    = 'Execution Delay'
+                    status      = $delayStatus
+                    description = "Average delay of $($rule.AvgDelay) minutes across $($rule.DelayedExecutions) delayed execution(s)."
+                    detailsHtml = $flyoutHtml
+                }
             }
             $analyticsHealthHtml += "</tbody></table>"
+            $executionDelaysFlyoutJson = ($executionDelaysFlyoutData | ConvertTo-Json -Depth 10 -Compress) -replace '</', '<\/'
+            $analyticsHealthHtml += "`n<script type=`"application/json`" id=`"executionDelaysTableFlyoutData`">$executionDelaysFlyoutJson</script>"
         }
     } else {
         # No health data available - show info message
@@ -6140,7 +6299,8 @@ _SentinelHealth()
 | where TimeGenerated > ago(7d)
 | where SentinelResourceType == "Analytics Rule"
 | where Status != "Success"
-| summarize FailureCount = count(), AffectedRules = dcount(SentinelResourceId) by Reason
+| summarize FailureCount = count(), AffectedRules = dcount(SentinelResourceId),
+    AffectedRuleNames = make_set(SentinelResourceName, 100) by Reason
 | order by FailureCount desc
 "@
             $collectedData.AnalyticsFailureReasons = Invoke-SentinelKqlQuery -WorkspaceId $workspaceId -Query $analyticsFailureReasonsQuery
