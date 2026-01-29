@@ -224,6 +224,104 @@ param (
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+#region Script-Level Variables for Cost Analysis
+
+# =============================================================================
+# FREE DATA SOURCES
+# =============================================================================
+# Tables that are ALWAYS free for ingestion in Microsoft Sentinel, regardless of license.
+# See: https://learn.microsoft.com/en-us/azure/sentinel/billing#free-data-sources
+# =============================================================================
+$script:FreeDataTables = @(
+    'AzureActivity',      # Azure subscription activity logs
+    'SentinelHealth',     # Sentinel health diagnostics (NOT SentinelAudit which is billable)
+    'SecurityAlert',      # Alerts from all Microsoft security products
+    'SecurityIncident',   # Sentinel incidents
+    'OfficeActivity'      # SharePoint, Exchange, Teams activity (M365 connector)
+)
+
+# =============================================================================
+# SENTINEL SOLUTION TABLES (90-day free retention)
+# =============================================================================
+# Tables that are part of the Microsoft Sentinel solution and receive 90 days
+# free retention (vs 31 days for standard Log Analytics tables).
+# =============================================================================
+$script:SentinelSolutionTables = @(
+    # Security tables from Sentinel connectors
+    'SecurityEvent', 'SecurityAlert', 'SecurityIncident',
+    'CommonSecurityLog', 'Syslog', 'WindowsFirewall',
+    'AzureActivity', 'OfficeActivity',
+    # Threat Intelligence tables
+    'ThreatIntelligenceIndicator', 'ThreatIntelIndicators',
+    # Sentinel operational tables
+    'SentinelHealth', 'SentinelAudit', 'SentinelAudit_CL',
+    # Microsoft Entra ID / Azure AD
+    'SigninLogs', 'AuditLogs', 'AADNonInteractiveUserSignInLogs',
+    'AADServicePrincipalSignInLogs', 'AADManagedIdentitySignInLogs',
+    'AADProvisioningLogs', 'ADFSSignInLogs', 'IdentityInfo',
+    'AADRiskyUsers', 'AADUserRiskEvents', 'AADRiskyServicePrincipals',
+    # Microsoft 365 Defender (XDR) tables
+    'DeviceEvents', 'DeviceFileEvents', 'DeviceImageLoadEvents',
+    'DeviceInfo', 'DeviceLogonEvents', 'DeviceNetworkEvents',
+    'DeviceNetworkInfo', 'DeviceProcessEvents', 'DeviceRegistryEvents',
+    'DeviceFileCertificateInfo', 'DynamicEventCollection',
+    'CloudAppEvents', 'EmailAttachmentInfo', 'EmailEvents',
+    'EmailPostDeliveryEvents', 'EmailUrlInfo', 'UrlClickEvents',
+    'IdentityLogonEvents', 'IdentityQueryEvents', 'IdentityDirectoryEvents',
+    'AlertEvidence', 'AlertInfo', 'BehaviorAnalytics', 'BehaviorEntities',
+    # Defender for Cloud Apps
+    'McasShadowItReporting',
+    # UEBA tables
+    'UserAccessAnalytics', 'UserPeerAnalytics', 'EntityAnalytics',
+    'Anomalies', 'AnomalyDetection',
+    # Watchlists
+    'Watchlist', 'WatchlistItem', '_GetWatchlist',
+    # Hunting bookmarks
+    'HuntingBookmark',
+    # Additional Sentinel tables
+    'SecurityRecommendation', 'SecurityNestedRecommendation',
+    'SecurityRegulatoryCompliance', 'SecurityBaseline',
+    'AzureDiagnostics', 'AzureNetworkAnalytics_CL',
+    # Defender for Endpoint
+    'DeviceTvmSecureConfigurationAssessment', 'DeviceTvmSoftwareInventory',
+    'DeviceTvmSoftwareVulnerabilities', 'DeviceTvmSoftwareVulnerabilitiesKB',
+    # Windows events
+    'WindowsEvent'
+)
+
+# =============================================================================
+# TABLES WITH FIXED RETENTION
+# =============================================================================
+# These tables have fixed retention periods that cannot be changed.
+# =============================================================================
+$script:FixedRetentionTables = @{
+    'Usage'         = 90   # Always 90 days, free
+    'AzureActivity' = 90   # Always 90 days, free
+}
+
+# =============================================================================
+# DEFENDER FOR SERVERS P2 ELIGIBLE TABLES
+# =============================================================================
+# Tables eligible for the Defender for Servers P2 benefit (500 MB/VM/day).
+# The benefit only applies to security-related data types ingested from protected VMs.
+# =============================================================================
+$script:DefenderP2EligibleTables = @(
+    'SecurityAlert',                    # Security alerts from Defender
+    'SecurityEvent',                    # Windows Security Events
+    'WindowsFirewall',                  # Windows Firewall logs
+    'SecurityBaseline',                 # Security baseline assessments
+    'SecurityBaselineSummary',          # Security baseline summary
+    'SecurityDetection',                # Security detections
+    'ProtectionStatus',                 # Endpoint protection status
+    'Update',                           # Windows Update status
+    'UpdateSummary',                    # Windows Update summary
+    'MDCFileIntegrityMonitoringEvents', # Microsoft Defender for Cloud FIM events
+    'WindowsEvent',                     # Windows Event logs (newer schema)
+    'LinuxAuditLog'                     # Linux audit logs
+)
+
+#endregion Script-Level Variables for Cost Analysis
+
 #region Helper Functions
 
 function Invoke-RestMethodWithRetry {
@@ -1008,6 +1106,1279 @@ function Get-DataCollectionRules {
     return ,$allDcrs
 }
 
+function Get-GraphAccessToken {
+    <#
+    .SYNOPSIS
+    Gets a Microsoft Graph access token using the current Azure session.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Context
+    )
+
+    try {
+        $tokenRequest = [Microsoft.Azure.Commands.Common.Authentication.AzureSession]::Instance.AuthenticationFactory.Authenticate(
+            $Context.Account,
+            $Context.Environment,
+            $Context.Tenant.Id,
+            $null,
+            "Never",
+            $null,
+            "https://graph.microsoft.com/"
+        )
+
+        if (-not $tokenRequest -or -not $tokenRequest.AccessToken) {
+            throw "Failed to obtain Graph access token."
+        }
+
+        return $tokenRequest.AccessToken
+    }
+    catch {
+        Write-Verbose "Failed to acquire Graph access token: $_"
+        return $null
+    }
+}
+
+function Get-E5LicenseCount {
+    <#
+    .SYNOPSIS
+    Retrieves E5/A5/F5/G5 license counts from Microsoft Graph API.
+    Returns the total enabled seats across all qualifying SKUs.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$GraphToken
+    )
+
+    # E5-tier SKU part numbers that include the 5MB/user/day Sentinel data grant
+    $e5SkuPartNumbers = @(
+        'SPE_E5',                    # Microsoft 365 E5
+        'ENTERPRISEPREMIUM',         # Office 365 E5
+        'M365_E5',                   # Microsoft 365 E5 (alternate)
+        'IDENTITY_THREAT_PROTECTION', # Microsoft 365 E5 Security
+        'M365_E5_SUITE_COMPONENTS',  # Microsoft 365 E5 Suite features
+        'SPE_E5_NOPSTNCONF',         # Microsoft 365 E5 without Audio Conferencing
+        'M365_SECURITY_COMPLIANCE_FOR_FLW', # Microsoft 365 F5 Security + Compliance
+        'SPE_F5_SEC',                # Microsoft 365 F5 Security Add-on
+        'SPE_F5_SECCOMP',            # Microsoft 365 F5 Security + Compliance Add-on
+        'M365_G5_GCC',               # Microsoft 365 G5 GCC
+        'SPE_E5_GOV',                # Microsoft 365 E5 Government
+        'MICROSOFT_365_E5_DEVELOPER', # Microsoft 365 E5 Developer
+        'M365EDU_A5_STUDENT',        # Microsoft 365 A5 for students
+        'M365EDU_A5_FACULTY',        # Microsoft 365 A5 for faculty
+        'M365EDU_A5_STUUSEBNFT',     # Microsoft 365 A5 student use benefit
+        'SPE_E5_CALLINGMINUTES'      # Microsoft 365 E5 with calling minutes
+    )
+
+    try {
+        $headers = @{
+            'Authorization' = "Bearer $GraphToken"
+            'Content-Type'  = 'application/json'
+        }
+
+        $uri = "https://graph.microsoft.com/v1.0/subscribedSkus"
+        $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method Get -ErrorAction Stop
+
+        $totalSeats = 0
+        $skuDetails = @()
+
+        foreach ($sku in $response.value) {
+            $skuPartNumber = $sku.skuPartNumber
+            if ($e5SkuPartNumbers -contains $skuPartNumber) {
+                $enabledUnits = $sku.prepaidUnits.enabled
+                $consumedUnits = $sku.consumedUnits
+                $totalSeats += $enabledUnits
+
+                $skuDetails += [PSCustomObject]@{
+                    SkuPartNumber = $skuPartNumber
+                    DisplayName   = $sku.skuPartNumber
+                    EnabledUnits  = $enabledUnits
+                    ConsumedUnits = $consumedUnits
+                }
+            }
+        }
+
+        return @{
+            TotalSeats = $totalSeats
+            SkuDetails = $skuDetails
+        }
+    }
+    catch {
+        $errorMsg = $_.Exception.Message
+        if ($errorMsg -match '403|Forbidden|Authorization_RequestDenied|Insufficient privileges') {
+            Write-Verbose "Graph API permission denied for subscribedSkus. Organization.Read.All permission required."
+        } else {
+            Write-Verbose "Failed to retrieve E5 license information: $_"
+        }
+        return $null
+    }
+}
+
+function Get-RegionCurrencyMapping {
+    <#
+    .SYNOPSIS
+    Maps Azure regions to their likely billing currencies.
+    #>
+    param(
+        [string]$Region
+    )
+
+    $regionCurrencyMap = @{
+        # Australia
+        'australiaeast'      = 'AUD'
+        'australiasoutheast' = 'AUD'
+        'australiacentral'   = 'AUD'
+        'australiacentral2'  = 'AUD'
+        # Europe
+        'westeurope'         = 'EUR'
+        'northeurope'        = 'EUR'
+        'francecentral'      = 'EUR'
+        'francesouth'        = 'EUR'
+        'germanywestcentral' = 'EUR'
+        'germanynorth'       = 'EUR'
+        'italynorth'         = 'EUR'
+        'swedencentral'      = 'EUR'
+        'switzerlandnorth'   = 'CHF'
+        'switzerlandwest'    = 'CHF'
+        'norwayeast'         = 'NOK'
+        'norwaywest'         = 'NOK'
+        # UK
+        'uksouth'            = 'GBP'
+        'ukwest'             = 'GBP'
+        # Canada
+        'canadacentral'      = 'CAD'
+        'canadaeast'         = 'CAD'
+        # Brazil
+        'brazilsouth'        = 'BRL'
+        'brazilsoutheast'    = 'BRL'
+        # Japan
+        'japaneast'          = 'JPY'
+        'japanwest'          = 'JPY'
+        # Korea
+        'koreacentral'       = 'KRW'
+        'koreasouth'         = 'KRW'
+        # India
+        'centralindia'       = 'INR'
+        'southindia'         = 'INR'
+        'westindia'          = 'INR'
+        # South Africa
+        'southafricanorth'   = 'ZAR'
+        'southafricawest'    = 'ZAR'
+        # UAE
+        'uaenorth'           = 'AED'
+        'uaecentral'         = 'AED'
+        # Default US regions and all others
+    }
+
+    if ($regionCurrencyMap.ContainsKey($Region)) {
+        return $regionCurrencyMap[$Region]
+    }
+    return 'USD'
+}
+
+function Get-SentinelPricingInfo {
+    <#
+    .SYNOPSIS
+    Retrieves Microsoft Sentinel pricing information from the Azure Retail Prices API.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Region,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Currency = 'USD'
+    )
+
+    try {
+        # Build the API filter for Sentinel pricing
+        $baseUri = "https://prices.azure.com/api/retail/prices?api-version=2023-01-01-preview"
+        $filter = "armRegionName eq '$Region' and serviceName eq 'Sentinel'"
+        $uri = "$baseUri&currencyCode=$Currency&`$filter=$filter"
+
+        $allPrices = @()
+        do {
+            $response = Invoke-RestMethod -Uri $uri -Method Get -ErrorAction Stop
+            if ($response.Items) {
+                $allPrices += $response.Items
+            }
+            $uri = $response.NextPageLink
+        } while ($uri)
+
+        # Parse pricing tiers
+        $payAsYouGo = 0
+        $commitmentTiers = @()
+        $basicLogsRate = 0
+        $auxiliaryLogsRate = 0
+        $analyticsRetentionRate = 0
+        $archiveRetentionRate = 0
+        $dataLakeStorageRate = 0
+        $dataLakeIngestionRate = 0
+
+        foreach ($price in $allPrices) {
+            $meterName = $price.meterName
+            $unitPrice = $price.unitPrice
+            $skuName = $price.skuName
+
+            # Skip reserved/spot pricing
+            if ($price.type -eq 'Reservation' -or $price.type -eq 'DevTestConsumption') {
+                continue
+            }
+
+            # Pay-As-You-Go (Analysis) - meter name is "Pay-as-you-go Analysis" or just "Analysis"
+            if ($meterName -match '(^Analysis$|Pay-as-you-go Analysis)' -and $unitPrice -gt 0) {
+                $payAsYouGo = $unitPrice
+            }
+            # Commitment tiers - match with or without "Capacity Reservation" suffix
+            elseif ($meterName -match '^(\d+) GB Commitment Tier') {
+                $tierGB = [int]$matches[1]
+                $effectivePerGB = if ($tierGB -gt 0) { [math]::Round($unitPrice / $tierGB, 4) } else { 0 }
+                $commitmentTiers += [PSCustomObject]@{
+                    TierGB        = $tierGB
+                    DailyRate     = $unitPrice
+                    EffectivePerGB = $effectivePerGB
+                }
+            }
+            # Basic Logs
+            elseif ($meterName -match 'Basic Logs') {
+                $basicLogsRate = $unitPrice
+            }
+            # Auxiliary Logs
+            elseif ($meterName -match 'Auxiliary Logs') {
+                $auxiliaryLogsRate = $unitPrice
+            }
+            # Interactive/Analytics Data Retention (beyond free period)
+            elseif ($meterName -match 'Interactive Data Retention|Analytics Data Retention|Data Retention' -and $unitPrice -gt 0) {
+                $analyticsRetentionRate = $unitPrice
+            }
+            # Archive tier retention
+            elseif ($meterName -match 'Archive|Archived Data' -and $unitPrice -gt 0) {
+                $archiveRetentionRate = $unitPrice
+            }
+            # Data Lake storage
+            elseif ($meterName -match 'Data Lake Storage' -and $unitPrice -gt 0) {
+                $dataLakeStorageRate = $unitPrice
+            }
+            # Data Lake ingestion
+            elseif ($meterName -match 'Data Lake Ingestion' -and $unitPrice -gt 0) {
+                $dataLakeIngestionRate = $unitPrice
+            }
+        }
+
+        # Sort commitment tiers by GB
+        if ($commitmentTiers.Count -gt 0) {
+            $commitmentTiers = @($commitmentTiers | Sort-Object TierGB)
+        } else {
+            $commitmentTiers = @()
+        }
+
+        # If PAYG wasn't found directly, estimate from the 100GB tier
+        # (PAYG is typically ~15-20% more expensive than the lowest commitment tier)
+        if ($payAsYouGo -eq 0 -and $commitmentTiers.Count -gt 0) {
+            $lowestTier = $commitmentTiers[0]
+            # Estimate PAYG as ~18% higher than the lowest tier effective rate
+            $payAsYouGo = [math]::Round($lowestTier.EffectivePerGB * 1.18, 4)
+            Write-Verbose "PAYG rate not found directly - estimated from lowest tier: $payAsYouGo"
+        }
+
+        return @{
+            Region                 = $Region
+            Currency               = $Currency
+            PayAsYouGo             = $payAsYouGo
+            CommitmentTiers        = $commitmentTiers
+            BasicLogsRate          = $basicLogsRate
+            AuxiliaryLogsRate      = $auxiliaryLogsRate
+            AnalyticsRetentionRate = $analyticsRetentionRate
+            ArchiveRetentionRate   = $archiveRetentionRate
+            DataLakeStorageRate    = $dataLakeStorageRate
+            DataLakeIngestionRate  = $dataLakeIngestionRate
+            CurrentRetailPrices    = $allPrices
+        }
+    }
+    catch {
+        Write-Verbose "Failed to retrieve Sentinel pricing information: $_"
+        return $null
+    }
+}
+
+function Invoke-CostOptimizationAnalysis {
+    <#
+    .SYNOPSIS
+    Analyzes ingestion patterns and recommends optimal pricing tier with comprehensive cost metrics.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$CollectedData
+    )
+
+    $result = @{
+        CurrentTier               = 'Unknown'
+        CurrentMonthlyCost        = 0
+        OptimalTier               = 'Unknown'
+        OptimalMonthlyCost        = 0
+        PotentialSavings          = 0
+        PotentialSavingsPercent   = 0
+        E5GrantUtilization        = 0
+        E5DailyGrantGB            = 0
+        E5EligibleIngestionGB     = 0
+        E5GrantUsedGB             = 0
+        E5DailyOverageGB          = 0
+        E5DaysWithOverage         = 0
+        E5MaxOverageGB            = 0
+        E5TotalOverageGB          = 0
+        FreeIngestionGB           = 0
+        DefenderP2BenefitGB       = 0
+        P2EligibleIngestionGB     = 0
+        P2BenefitAppliedGB        = 0
+        P2BenefitUtilization      = 0
+        BillableIngestionGB       = 0
+        EffectiveDailyIngestionGB = 0
+        PricingModel              = 'Unknown'
+        TierComparison            = @()
+        TopTablesAnalysis         = @()
+        BasicLogsCandidates       = @()
+        AuxiliaryLogsCandidates   = @()
+        DataLakeCandidates        = @()
+        DedicatedClusterRecommendation = $null
+        AnalysisNotes             = @()
+    }
+
+    # Get pricing info
+    $pricing = $CollectedData.PricingInfo
+    if (-not $pricing -or -not $pricing.PayAsYouGo) {
+        $result.AnalysisNotes += "Pricing data not available for analysis."
+        return $result
+    }
+
+    # Store pricing model
+    $pricingModelInfo = $CollectedData.SentinelPricingModel
+    $result.PricingModel = if ($pricingModelInfo -and $pricingModelInfo.PricingModel) { $pricingModelInfo.PricingModel } else { 'Unknown' }
+
+    # Calculate average daily ingestion from trend data
+    $avgDailyIngestion = 0
+    if ($CollectedData.IngestionTrend -and $CollectedData.IngestionTrend.Count -gt 0) {
+        $avgDailyIngestion = ($CollectedData.IngestionTrend | Measure-Object -Property TotalGB -Average).Average
+    }
+
+    if ($avgDailyIngestion -eq 0) {
+        $result.AnalysisNotes += "No ingestion data available for analysis."
+        return $result
+    }
+
+    # Calculate free data ingestion
+    $freeIngestionDaily = 0.0
+    if ($CollectedData.TopTables) {
+        foreach ($table in $CollectedData.TopTables) {
+            if ($script:FreeDataTables -contains $table.DataType) {
+                $freeIngestionDaily += ([double]$table.TotalGB / 30)
+            }
+        }
+    }
+    $result.FreeIngestionGB = [math]::Round($freeIngestionDaily, 2)
+
+    # Get Defender for Servers P2 benefit
+    $defenderP2BenefitGB = 0
+    if ($CollectedData.DefenderServersP2 -and $CollectedData.DefenderServersP2.Enabled) {
+        $defenderP2BenefitGB = $CollectedData.DefenderServersP2.DailyBenefitGB
+    }
+    $result.DefenderP2BenefitGB = [math]::Round($defenderP2BenefitGB, 2)
+
+    # Calculate P2-eligible ingestion
+    $p2EligibleIngestion = 0.0
+    if ($CollectedData.TopTables) {
+        foreach ($table in $CollectedData.TopTables) {
+            if ($script:DefenderP2EligibleTables -contains $table.DataType) {
+                $p2EligibleIngestion += [double]$table.TotalGB
+            }
+        }
+        $p2EligibleIngestion = $p2EligibleIngestion / 30
+    }
+    $result.P2EligibleIngestionGB = [math]::Round($p2EligibleIngestion, 2)
+
+    # Calculate billable ingestion (total minus free)
+    $billableIngestion = [math]::Max(0.0, $avgDailyIngestion - $freeIngestionDaily)
+    $result.BillableIngestionGB = [math]::Round($billableIngestion, 2)
+
+    # Determine current tier
+    $wsProps = Get-SafeProperty $CollectedData.WorkspaceConfig 'properties'
+    $skuProps = Get-SafeProperty $wsProps 'sku'
+    $currentCapacity = Get-SafeProperty $skuProps 'capacityReservationLevel'
+
+    if ($currentCapacity -and $currentCapacity -gt 0) {
+        $result.CurrentTier = "$currentCapacity GB/day"
+    } else {
+        $result.CurrentTier = 'Pay-As-You-Go'
+    }
+
+    # E5 eligible tables list
+    $e5EligibleTables = @(
+        'SigninLogs', 'AuditLogs', 'AADNonInteractiveUserSignInLogs',
+        'AADServicePrincipalSignInLogs', 'AADManagedIdentitySignInLogs',
+        'AADProvisioningLogs', 'ADFSSignInLogs', 'McasShadowItReporting',
+        'InformationProtectionLogs_CL', 'DeviceEvents', 'DeviceFileEvents',
+        'DeviceImageLoadEvents', 'DeviceInfo', 'DeviceLogonEvents',
+        'DeviceNetworkEvents', 'DeviceNetworkInfo', 'DeviceProcessEvents',
+        'DeviceRegistryEvents', 'DeviceFileCertificateInfo', 'DynamicEventCollection',
+        'CloudAppEvents', 'EmailAttachmentInfo', 'EmailEvents',
+        'EmailPostDeliveryEvents', 'EmailUrlInfo', 'IdentityLogonEvents',
+        'IdentityQueryEvents', 'IdentityDirectoryEvents', 'AlertEvidence', 'UrlClickEvents'
+    )
+
+    # Calculate E5 grant
+    $e5Info = $CollectedData.E5LicenseInfo
+    $e5DailyGrantGB = 0
+    $e5EligibleIngestionRaw = 0
+
+    # Calculate eligible ingestion from top tables
+    $eligibleIngestion = 0.0
+    if ($CollectedData.TopTables) {
+        foreach ($table in $CollectedData.TopTables) {
+            if ($e5EligibleTables -contains $table.DataType) {
+                $eligibleIngestion += [double]$table.TotalGB
+            }
+        }
+        $eligibleIngestion = $eligibleIngestion / 30
+    }
+    $result.E5EligibleIngestionGB = [math]::Round($eligibleIngestion, 2)
+    $e5EligibleIngestionRaw = $eligibleIngestion
+
+    # Calculate accurate daily E5 overage
+    $e5TotalOverageGB = 0.0
+    $e5DaysWithOverage = 0
+    $e5MaxOverageGB = 0.0
+    $e5GrantUsed = 0.0
+
+    if ($e5Info -and $e5Info.TotalSeats -gt 0) {
+        $e5DailyGrantGB = $e5Info.TotalSeats * 0.005
+        $result.E5DailyGrantGB = [math]::Round($e5DailyGrantGB, 2)
+
+        # Use daily E5 ingestion data if available
+        if ($CollectedData.E5DailyIngestion -and $CollectedData.E5DailyIngestion.Count -gt 0) {
+            foreach ($day in $CollectedData.E5DailyIngestion) {
+                $dayEligible = [double]$day.DailyEligibleGB
+                $dayOverage = [math]::Max(0.0, $dayEligible - $e5DailyGrantGB)
+                $dayGrantUsed = [math]::Min($dayEligible, $e5DailyGrantGB)
+
+                $e5TotalOverageGB += $dayOverage
+                $e5GrantUsed += $dayGrantUsed
+                if ($dayOverage -gt 0) { $e5DaysWithOverage++ }
+                if ($dayOverage -gt $e5MaxOverageGB) { $e5MaxOverageGB = $dayOverage }
+            }
+
+            $daysCount = $CollectedData.E5DailyIngestion.Count
+            $e5AvgDailyOverageGB = $e5TotalOverageGB / $daysCount
+            $e5GrantUsed = $e5GrantUsed / $daysCount
+
+            $result.E5DailyOverageGB = [math]::Round($e5AvgDailyOverageGB, 2)
+            $result.E5DaysWithOverage = $e5DaysWithOverage
+            $result.E5MaxOverageGB = [math]::Round($e5MaxOverageGB, 2)
+            $result.E5TotalOverageGB = [math]::Round($e5TotalOverageGB, 2)
+        } else {
+            $e5GrantUsed = [math]::Min($e5EligibleIngestionRaw, $e5DailyGrantGB)
+        }
+
+        # Calculate utilization
+        if ($e5DailyGrantGB -gt 0) {
+            $utilization = [math]::Min(100, [math]::Round(($e5GrantUsed / $e5DailyGrantGB) * 100, 1))
+            $result.E5GrantUtilization = $utilization
+        }
+    }
+
+    # Calculate P2 benefit applied (limited to P2-eligible ingestion)
+    $p2BenefitApplied = [math]::Min($defenderP2BenefitGB, $p2EligibleIngestion)
+    $result.P2BenefitAppliedGB = [math]::Round($p2BenefitApplied, 2)
+
+    if ($defenderP2BenefitGB -gt 0) {
+        $p2Utilization = [math]::Min(100, [math]::Round(($p2BenefitApplied / $defenderP2BenefitGB) * 100, 1))
+        $result.P2BenefitUtilization = $p2Utilization
+    }
+
+    # Calculate effective billable ingestion after all deductions
+    $effectiveDailyIngestion = [math]::Max(0.0, $billableIngestion - $e5GrantUsed - $p2BenefitApplied)
+    $result.E5GrantUsedGB = [math]::Round($e5GrantUsed, 2)
+    $result.EffectiveDailyIngestionGB = [math]::Round($effectiveDailyIngestion, 2)
+
+    # Build top tables analysis
+    $topTablesAnalysis = @()
+    if ($CollectedData.TopTables) {
+        $daysInPeriod = 30
+        $e5GrantRatio = if ($e5EligibleIngestionRaw -gt 0 -and $e5DailyGrantGB -gt 0) {
+            [math]::Min(1.0, $e5DailyGrantGB / $e5EligibleIngestionRaw)
+        } else { 0 }
+
+        foreach ($table in ($CollectedData.TopTables | Select-Object -First 10)) {
+            $tableName = $table.DataType
+            $monthlyGB = [double]$table.TotalGB
+            $dailyGB = $monthlyGB / $daysInPeriod
+
+            $isFree = $script:FreeDataTables -contains $tableName
+            $isE5Eligible = $e5EligibleTables -contains $tableName
+
+            $rawMonthlyCost = $monthlyGB * $pricing.PayAsYouGo
+
+            $e5GrantAppliedGB = 0
+            $e5GrantAppliedCost = 0
+            if ($isE5Eligible -and $e5DailyGrantGB -gt 0) {
+                $e5GrantAppliedGB = $dailyGB * $e5GrantRatio * $daysInPeriod
+                $e5GrantAppliedCost = $e5GrantAppliedGB * $pricing.PayAsYouGo
+            }
+
+            $effectiveMonthlyCost = if ($isFree) { 0 } else { [math]::Max(0, $rawMonthlyCost - $e5GrantAppliedCost) }
+
+            $topTablesAnalysis += [PSCustomObject]@{
+                TableName           = $tableName
+                MonthlyGB           = [math]::Round($monthlyGB, 2)
+                DailyGB             = [math]::Round($dailyGB, 2)
+                IsFree              = $isFree
+                IsE5Eligible        = $isE5Eligible
+                RawMonthlyCost      = [math]::Round($rawMonthlyCost, 2)
+                E5GrantAppliedGB    = [math]::Round($e5GrantAppliedGB, 2)
+                E5GrantAppliedCost  = [math]::Round($e5GrantAppliedCost, 2)
+                EffectiveMonthlyCost = [math]::Round($effectiveMonthlyCost, 2)
+            }
+        }
+    }
+    $result.TopTablesAnalysis = $topTablesAnalysis
+
+    # Calculate monthly costs for each tier
+    $daysPerMonth = 30.44
+    $tierComparison = @()
+
+    # Pay-As-You-Go
+    $paygMonthlyCost = $effectiveDailyIngestion * $pricing.PayAsYouGo * $daysPerMonth
+    $tierComparison += [PSCustomObject]@{
+        Tier            = 'Pay-As-You-Go'
+        TierGB          = 0
+        DailyRate       = $pricing.PayAsYouGo
+        EffectivePerGB  = $pricing.PayAsYouGo
+        MonthlyEstimate = [math]::Round($paygMonthlyCost, 2)
+        OverageEstimate = 0
+        TotalEstimate   = [math]::Round($paygMonthlyCost, 2)
+        VsCurrent       = 0
+        VsCurrentPercent = 0
+        IsOptimal       = $false
+        IsCurrent       = ($result.CurrentTier -eq 'Pay-As-You-Go')
+    }
+
+    # Commitment tiers
+    foreach ($tier in $pricing.CommitmentTiers) {
+        $tierDailyCost = $tier.DailyRate
+        $tierMonthlyBase = $tierDailyCost * $daysPerMonth
+
+        $overageGB = [math]::Max(0.0, $effectiveDailyIngestion - $tier.TierGB)
+        $overageMonthlyCost = $overageGB * $tier.EffectivePerGB * $daysPerMonth
+
+        $totalMonthlyCost = $tierMonthlyBase + $overageMonthlyCost
+        $isCurrent = ($result.CurrentTier -eq "$($tier.TierGB) GB/day")
+
+        $tierComparison += [PSCustomObject]@{
+            Tier            = "$($tier.TierGB) GB/day"
+            TierGB          = $tier.TierGB
+            DailyRate       = $tier.DailyRate
+            EffectivePerGB  = $tier.EffectivePerGB
+            MonthlyEstimate = [math]::Round($tierMonthlyBase, 2)
+            OverageEstimate = [math]::Round($overageMonthlyCost, 2)
+            TotalEstimate   = [math]::Round($totalMonthlyCost, 2)
+            VsCurrent       = 0
+            VsCurrentPercent = 0
+            IsOptimal       = $false
+            IsCurrent       = $isCurrent
+        }
+    }
+
+    # Find current tier cost
+    $currentTierEntry = $tierComparison | Where-Object { $_.IsCurrent }
+    $currentMonthlyCost = if ($currentTierEntry) { $currentTierEntry.TotalEstimate } else { $paygMonthlyCost }
+    $result.CurrentMonthlyCost = $currentMonthlyCost
+
+    # Calculate vs current for each tier
+    foreach ($tier in $tierComparison) {
+        $tier.VsCurrent = [math]::Round($tier.TotalEstimate - $currentMonthlyCost, 2)
+        $tier.VsCurrentPercent = if ($currentMonthlyCost -gt 0) {
+            [math]::Round((($tier.TotalEstimate - $currentMonthlyCost) / $currentMonthlyCost) * 100, 1)
+        } else { 0 }
+    }
+
+    # Find optimal tier
+    $optimalTier = $tierComparison | Sort-Object TotalEstimate | Select-Object -First 1
+    $optimalTier.IsOptimal = $true
+    $result.OptimalTier = $optimalTier.Tier
+    $result.OptimalMonthlyCost = $optimalTier.TotalEstimate
+    $result.PotentialSavings = [math]::Round($currentMonthlyCost - $optimalTier.TotalEstimate, 2)
+    $result.PotentialSavingsPercent = if ($currentMonthlyCost -gt 0) {
+        [math]::Round((($currentMonthlyCost - $optimalTier.TotalEstimate) / $currentMonthlyCost) * 100, 1)
+    } else { 0 }
+
+    $result.TierComparison = $tierComparison
+
+    # Identify Basic Logs candidates
+    $basicLogsCandidates = @()
+    $basicLogsEligibleTables = @(
+        'ContainerLogV2', 'AppTraces', 'AppDependencies', 'AppRequests',
+        'AzureDiagnostics', 'AzureMetrics', 'StorageBlobLogs', 'StorageFileLogs',
+        'StorageQueueLogs', 'StorageTableLogs', 'AWSCloudTrail', 'AWSVPCFlow',
+        'AWSGuardDuty', 'GCPAuditLogs', 'SecurityEvent', 'CommonSecurityLog', 'Syslog'
+    )
+
+    if ($CollectedData.TopTables) {
+        foreach ($table in $CollectedData.TopTables) {
+            $tableName = $table.DataType
+            $tableGB = [double]$table.TotalGB
+
+            $isFree = $script:FreeDataTables -contains $tableName
+            $isE5Covered = ($e5EligibleTables -contains $tableName) -and ($e5DailyGrantGB -gt 0)
+
+            if ($isFree -or $isE5Covered) { continue }
+
+            if ($basicLogsEligibleTables -contains $tableName -or $tableName -match '_CL$') {
+                $monthlyGB = $tableGB
+                $currentCost = $monthlyGB * $pricing.PayAsYouGo
+                $basicCost = $monthlyGB * $pricing.BasicLogsRate
+                $savings = $currentCost - $basicCost
+
+                if ($savings -gt 10) {
+                    $basicLogsCandidates += [PSCustomObject]@{
+                        TableName       = $tableName
+                        MonthlyGB       = [math]::Round($monthlyGB, 2)
+                        CurrentCost     = [math]::Round($currentCost, 2)
+                        BasicCost       = [math]::Round($basicCost, 2)
+                        PotentialSavings = [math]::Round($savings, 2)
+                    }
+                }
+            }
+        }
+    }
+    $result.BasicLogsCandidates = $basicLogsCandidates | Sort-Object PotentialSavings -Descending
+
+    # Identify Auxiliary Logs candidates
+    $auxiliaryLogsCandidates = @()
+    $auxiliaryLogsEligibleTables = @(
+        'AzureDiagnostics', 'AzureMetrics', 'ContainerLogV2',
+        'StorageBlobLogs', 'StorageFileLogs', 'StorageQueueLogs', 'StorageTableLogs',
+        'AWSCloudTrail', 'AWSVPCFlow', 'GCPAuditLogs', 'AppTraces', 'AppDependencies',
+        'AzureNetworkAnalytics_CL', 'NSGFlowLogs', 'VMConnection'
+    )
+
+    if ($CollectedData.TopTables -and $pricing.AuxiliaryLogsRate -gt 0) {
+        foreach ($table in $CollectedData.TopTables) {
+            $tableName = $table.DataType
+            $tableGB = [double]$table.TotalGB
+
+            $isFree = $script:FreeDataTables -contains $tableName
+            $isE5Covered = ($e5EligibleTables -contains $tableName) -and ($e5DailyGrantGB -gt 0)
+
+            if ($isFree -or $isE5Covered) { continue }
+
+            if ($auxiliaryLogsEligibleTables -contains $tableName) {
+                $monthlyGB = $tableGB
+                $currentCost = $monthlyGB * $pricing.PayAsYouGo
+                $auxiliaryCost = $monthlyGB * $pricing.AuxiliaryLogsRate
+                $savings = $currentCost - $auxiliaryCost
+
+                if ($savings -gt 50) {
+                    $auxiliaryLogsCandidates += [PSCustomObject]@{
+                        TableName         = $tableName
+                        MonthlyGB         = [math]::Round($monthlyGB, 2)
+                        CurrentCost       = [math]::Round($currentCost, 2)
+                        AuxiliaryCost     = [math]::Round($auxiliaryCost, 2)
+                        PotentialSavings  = [math]::Round($savings, 2)
+                    }
+                }
+            }
+        }
+    }
+    $result.AuxiliaryLogsCandidates = $auxiliaryLogsCandidates | Sort-Object PotentialSavings -Descending
+
+    # Dedicated Cluster Recommendation
+    $clusterInfo = $CollectedData.DedicatedCluster
+    $totalDailyIngestion = $avgDailyIngestion
+
+    if ($clusterInfo -and -not $clusterInfo.IsLinkedToCluster -and $totalDailyIngestion -ge 100) {
+        $result.DedicatedClusterRecommendation = @{
+            Recommended           = $true
+            Reason                = 'High ingestion volume'
+            CurrentDailyIngestion = [math]::Round($totalDailyIngestion, 2)
+            MinimumClusterTier    = 100
+            Benefits              = @(
+                'Aggregate data volume across multiple workspaces in the same region'
+                'Share a single commitment tier across all linked workspaces'
+                'Faster cross-workspace queries when all workspaces are in the cluster'
+                'Customer-managed keys for data encryption'
+            )
+        }
+    }
+    elseif ($clusterInfo -and $clusterInfo.IsLinkedToCluster) {
+        $result.DedicatedClusterRecommendation = @{
+            Recommended           = $false
+            Reason                = 'Already linked to cluster'
+            ClusterName           = $clusterInfo.ClusterName
+            ClusterCapacityTier   = $clusterInfo.ClusterCapacityTier
+            CurrentDailyIngestion = [math]::Round($totalDailyIngestion, 2)
+        }
+    }
+    elseif ($totalDailyIngestion -lt 100) {
+        $result.DedicatedClusterRecommendation = @{
+            Recommended           = $false
+            Reason                = 'Ingestion below 100 GB/day threshold'
+            CurrentDailyIngestion = [math]::Round($totalDailyIngestion, 2)
+            MinimumRequired       = 100
+        }
+    }
+
+    # Add analysis notes
+    if ($result.PotentialSavings -gt 0) {
+        $result.AnalysisNotes += "Switching to $($result.OptimalTier) could save approximately $($pricing.Currency) $($result.PotentialSavings)/month."
+    }
+
+    if ($freeIngestionDaily -gt 0) {
+        $result.AnalysisNotes += "Free data sources detected: $([math]::Round($result.FreeIngestionGB, 2)) GB/day not counted toward billable ingestion."
+    }
+
+    if ($defenderP2BenefitGB -gt 0) {
+        $result.AnalysisNotes += "Defender for Servers P2 benefit applied: $([math]::Round($result.P2BenefitAppliedGB, 2)) GB/day included free."
+    }
+
+    if ($e5DailyGrantGB -gt 0 -and $result.E5GrantUtilization -lt 50) {
+        $result.AnalysisNotes += "E5 data grant is underutilized. Ensure E5-eligible data sources (Entra ID, M365) are connected."
+    }
+
+    if ($basicLogsCandidates.Count -gt 0) {
+        $totalBasicSavings = ($basicLogsCandidates | Measure-Object -Property PotentialSavings -Sum).Sum
+        $result.AnalysisNotes += "Converting $($basicLogsCandidates.Count) table(s) to Basic Logs could save approximately $($pricing.Currency) $([math]::Round($totalBasicSavings, 2))/month."
+    }
+
+    if ($auxiliaryLogsCandidates.Count -gt 0) {
+        $totalAuxSavings = ($auxiliaryLogsCandidates | Measure-Object -Property PotentialSavings -Sum).Sum
+        $result.AnalysisNotes += "Converting $($auxiliaryLogsCandidates.Count) table(s) to Auxiliary Logs could save approximately $($pricing.Currency) $([math]::Round($totalAuxSavings, 2))/month (note: limited query capabilities)."
+    }
+
+    if ($result.PricingModel -eq 'Classic') {
+        $result.AnalysisNotes += "Classic pricing detected: Log Analytics ingestion costs are billed separately from Sentinel."
+    }
+
+    if ($result.DedicatedClusterRecommendation -and $result.DedicatedClusterRecommendation.Recommended) {
+        $result.AnalysisNotes += "DEDICATED CLUSTER RECOMMENDED: Ingesting $([math]::Round($totalDailyIngestion, 2)) GB/day exceeds 100 GB threshold."
+    }
+
+    return $result
+}
+
+function Get-SentinelPricingModel {
+    <#
+    .SYNOPSIS
+    Detects whether the workspace is using Simplified or Classic pricing.
+
+    .DESCRIPTION
+    Queries the Microsoft Sentinel solution resource to determine the pricing model.
+    See: https://learn.microsoft.com/en-us/azure/sentinel/enroll-simplified-pricing-tier
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SubscriptionId,
+        [Parameter(Mandatory = $true)]
+        [string]$ResourceGroupName,
+        [Parameter(Mandatory = $true)]
+        [string]$WorkspaceName,
+        [Parameter(Mandatory = $true)]
+        [hashtable]$AuthHeader
+    )
+
+    $result = @{
+        PricingModel    = 'Unknown'
+        SkuName         = $null
+        CapacityTier    = $null
+        DetectionMethod = 'None'
+        ErrorMessage    = $null
+    }
+
+    try {
+        # Query the Sentinel solution resource
+        $solutionName = "SecurityInsights($WorkspaceName)"
+        $solutionUri = "https://management.azure.com/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.OperationsManagement/solutions/$solutionName`?api-version=2015-11-01-preview"
+
+        Write-Verbose "Querying Sentinel solution: $solutionUri"
+        $solutionResponse = Invoke-RestMethodWithRetry -Uri $solutionUri -Method 'GET' -Headers $AuthHeader
+
+        if ($solutionResponse -and $solutionResponse.properties -and $solutionResponse.properties.sku) {
+            $skuName = $solutionResponse.properties.sku.name
+            $result.SkuName = $skuName
+            $result.DetectionMethod = 'SentinelSolution'
+
+            # Check for capacity reservation level
+            $capacityLevel = Get-SafeProperty $solutionResponse.properties.sku 'capacityReservationLevel'
+            if ($capacityLevel) {
+                $result.CapacityTier = $capacityLevel
+            }
+
+            # Determine pricing model based on SKU name
+            switch -Regex ($skuName) {
+                '^Unified$' {
+                    $result.PricingModel = 'Simplified'
+                    Write-Verbose "Detected Simplified pricing (SKU: Unified)"
+                }
+                '^PerGB$' {
+                    $result.PricingModel = 'Classic'
+                    Write-Verbose "Detected Classic pricing (SKU: PerGB)"
+                }
+                '^capacityreservation$' {
+                    $result.PricingModel = 'Classic'
+                    Write-Verbose "Detected Classic pricing (SKU: capacityreservation)"
+                }
+                default {
+                    $result.PricingModel = 'Unknown'
+                    Write-Verbose "Unknown SKU name: $skuName"
+                }
+            }
+        }
+        else {
+            Write-Verbose "Sentinel solution response did not contain expected sku property"
+            $result.ErrorMessage = "Solution SKU property not found"
+        }
+    }
+    catch {
+        $errorMsg = $_.Exception.Message
+        Write-Verbose "Failed to query Sentinel solution: $errorMsg"
+        $result.ErrorMessage = $errorMsg
+        $result.DetectionMethod = 'Failed'
+    }
+
+    return $result
+}
+
+function Get-DefenderServersP2Benefit {
+    <#
+    .SYNOPSIS
+    Checks if Defender for Servers P2 is enabled and calculates the daily data benefit.
+
+    .DESCRIPTION
+    Defender for Servers P2 includes 500 MB/day per protected VM for security data types.
+    See: https://learn.microsoft.com/en-us/azure/defender-for-cloud/faq-defender-for-servers
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SubscriptionId,
+        [Parameter(Mandatory = $true)]
+        [hashtable]$AuthHeader,
+        [Parameter(Mandatory = $false)]
+        [string]$WorkspaceId,
+        [Parameter(Mandatory = $false)]
+        [switch]$SkipKqlQueries
+    )
+
+    $result = @{
+        Enabled           = $false
+        PricingTier       = 'Free'
+        ProtectedVMCount  = 0
+        DailyBenefitGB    = 0
+        VMCountMethod     = 'None'
+        CheckedAt         = Get-Date
+    }
+
+    try {
+        # Query Defender for Cloud pricing configuration for VirtualMachines
+        $pricingUri = "https://management.azure.com/subscriptions/$SubscriptionId/providers/Microsoft.Security/pricings/VirtualMachines?api-version=2024-01-01"
+        $pricingResponse = Invoke-RestMethodWithRetry -Uri $pricingUri -Method 'GET' -Headers $AuthHeader
+
+        if ($pricingResponse -and $pricingResponse.properties) {
+            $pricingTier = $pricingResponse.properties.pricingTier
+            $result.PricingTier = $pricingTier
+
+            # P2 is indicated by pricingTier = 'Standard' and subPlan = 'P2'
+            $subPlan = Get-SafeProperty $pricingResponse.properties 'subPlan'
+            if ($pricingTier -eq 'Standard' -and $subPlan -eq 'P2') {
+                $result.Enabled = $true
+                Write-Verbose "Defender for Servers P2 is enabled (subPlan: $subPlan)"
+            } elseif ($pricingTier -eq 'Standard') {
+                Write-Verbose "Defender for Servers is enabled but not P2 (subPlan: $subPlan)"
+            } else {
+                Write-Verbose "Defender for Servers is not enabled (tier: $pricingTier)"
+            }
+        }
+
+        # If P2 is enabled and we have a workspace, count protected VMs
+        if ($result.Enabled -and $WorkspaceId -and -not $SkipKqlQueries) {
+            # Method 1: Count VMs from Heartbeat
+            $vmCountQuery = @"
+Heartbeat
+| where TimeGenerated > ago(1d)
+| where ResourceType =~ 'virtualMachines' or ResourceType =~ 'servers' or isempty(ResourceType)
+| distinct Computer
+| count
+"@
+            $vmCountResult = Invoke-SentinelKqlQuery -WorkspaceId $WorkspaceId -Query $vmCountQuery
+            if ($vmCountResult -and $vmCountResult.Count -gt 0 -and [int]$vmCountResult[0].Count -gt 0) {
+                $result.ProtectedVMCount = [int]$vmCountResult[0].Count
+                $result.VMCountMethod = 'Heartbeat'
+                Write-Verbose "VM count from Heartbeat: $($result.ProtectedVMCount)"
+            }
+
+            # Method 2 (Fallback): Count from P2-eligible security tables
+            if ($result.ProtectedVMCount -eq 0) {
+                $p2ActiveVMsQuery = @"
+union withsource=TableName SecurityEvent, WindowsEvent, LinuxAuditLog
+| where TimeGenerated > ago(1d)
+| distinct Computer
+| count
+"@
+                $p2VMCountResult = Invoke-SentinelKqlQuery -WorkspaceId $WorkspaceId -Query $p2ActiveVMsQuery
+                if ($p2VMCountResult -and $p2VMCountResult.Count -gt 0 -and [int]$p2VMCountResult[0].Count -gt 0) {
+                    $result.ProtectedVMCount = [int]$p2VMCountResult[0].Count
+                    $result.VMCountMethod = 'P2Tables'
+                    Write-Verbose "VM count from P2-eligible tables: $($result.ProtectedVMCount)"
+                }
+            }
+
+            # Calculate benefit if we have a VM count (500 MB per VM per day = 0.5 GB)
+            if ($result.ProtectedVMCount -gt 0) {
+                $result.DailyBenefitGB = $result.ProtectedVMCount * 0.5
+                Write-Verbose "Protected VM count: $($result.ProtectedVMCount), Daily benefit: $($result.DailyBenefitGB) GB"
+            }
+        }
+    }
+    catch {
+        Write-Verbose "Failed to check Defender for Servers P2 status: $_"
+    }
+
+    return $result
+}
+
+function Get-DedicatedClusterInfo {
+    <#
+    .SYNOPSIS
+    Checks if the workspace is linked to a Log Analytics dedicated cluster.
+
+    .DESCRIPTION
+    Log Analytics dedicated clusters can reduce costs when ingesting at least 100 GB/day.
+    See: https://learn.microsoft.com/en-us/azure/azure-monitor/logs/logs-dedicated-clusters
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$WorkspaceConfig,
+        [Parameter(Mandatory = $true)]
+        [string]$SubscriptionId,
+        [Parameter(Mandatory = $true)]
+        [hashtable]$AuthHeader
+    )
+
+    $result = @{
+        IsLinkedToCluster     = $false
+        ClusterResourceId     = $null
+        ClusterName           = $null
+        ClusterCapacityTier   = $null
+        ClusterBillingType    = $null
+        ClusterSku            = $null
+        LinkedWorkspaceCount  = $null
+        ErrorMessage          = $null
+        CheckedAt             = Get-Date
+    }
+
+    try {
+        # Check if workspace is linked to a cluster via the features.clusterResourceId property
+        $wsProps = Get-SafeProperty $WorkspaceConfig 'properties'
+        $wsFeatures = Get-SafeProperty $wsProps 'features'
+        $clusterResourceId = Get-SafeProperty $wsFeatures 'clusterResourceId'
+
+        if ($clusterResourceId) {
+            $result.IsLinkedToCluster = $true
+            $result.ClusterResourceId = $clusterResourceId
+            Write-Verbose "Workspace is linked to cluster: $clusterResourceId"
+
+            # Extract cluster name from resource ID
+            if ($clusterResourceId -match '/clusters/([^/]+)$') {
+                $result.ClusterName = $matches[1]
+            }
+
+            # Try to get cluster details
+            try {
+                $clusterUri = "https://management.azure.com$clusterResourceId`?api-version=2023-09-01"
+                $clusterResponse = Invoke-RestMethodWithRetry -Uri $clusterUri -Method 'GET' -Headers $AuthHeader
+
+                if ($clusterResponse -and $clusterResponse.properties) {
+                    $clusterProps = $clusterResponse.properties
+                    $clusterSku = Get-SafeProperty $clusterResponse 'sku'
+
+                    $result.ClusterSku = Get-SafeProperty $clusterSku 'name'
+                    $result.ClusterCapacityTier = Get-SafeProperty $clusterSku 'capacity'
+                    $result.ClusterBillingType = Get-SafeProperty $clusterProps 'billingType'
+
+                    Write-Verbose "Cluster capacity: $($result.ClusterCapacityTier) GB/day, Billing: $($result.ClusterBillingType)"
+                }
+            }
+            catch {
+                Write-Verbose "Could not retrieve cluster details: $_"
+            }
+        }
+        else {
+            Write-Verbose "Workspace is not linked to a dedicated cluster"
+        }
+    }
+    catch {
+        $result.ErrorMessage = $_.Exception.Message
+        Write-Verbose "Failed to check dedicated cluster status: $_"
+    }
+
+    return $result
+}
+
+function Get-TableRetentionSettings {
+    <#
+    .SYNOPSIS
+    Retrieves retention settings for all tables in the workspace.
+
+    .DESCRIPTION
+    Queries the Log Analytics workspace to get retention settings for each table.
+    Returns workspace default retention and per-table overrides.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SubscriptionId,
+        [Parameter(Mandatory = $true)]
+        [string]$ResourceGroupName,
+        [Parameter(Mandatory = $true)]
+        [string]$WorkspaceName,
+        [Parameter(Mandatory = $true)]
+        [hashtable]$AuthHeader
+    )
+
+    $result = @{
+        WorkspaceDefaultRetentionDays = 90  # Default fallback
+        Tables                        = @{}
+        TablesWithCustomRetention     = @()
+        TablesUsingDataLake           = @()
+        ErrorMessage                  = $null
+    }
+
+    try {
+        # Get workspace default retention
+        $workspaceUri = "https://management.azure.com/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.OperationalInsights/workspaces/$WorkspaceName`?api-version=2023-09-01"
+        $workspaceResponse = Invoke-RestMethodWithRetry -Uri $workspaceUri -Method 'GET' -Headers $AuthHeader
+
+        if ($workspaceResponse -and $workspaceResponse.properties) {
+            $result.WorkspaceDefaultRetentionDays = $workspaceResponse.properties.retentionInDays
+            Write-Verbose "Workspace default retention: $($result.WorkspaceDefaultRetentionDays) days"
+        }
+
+        # Get all tables with their retention settings
+        $tablesUri = "https://management.azure.com/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.OperationalInsights/workspaces/$WorkspaceName/tables?api-version=2022-10-01"
+        $tablesResponse = Invoke-RestMethodWithRetry -Uri $tablesUri -Method 'GET' -Headers $AuthHeader
+
+        if ($tablesResponse -and $tablesResponse.value) {
+            foreach ($table in $tablesResponse.value) {
+                $tableName = $table.name
+                $props = $table.properties
+
+                # Get retention values (-1 or null means inherit workspace default)
+                $retentionInDays = Get-SafeProperty $props 'retentionInDays'
+                $totalRetentionInDays = Get-SafeProperty $props 'totalRetentionInDays'
+                $plan = Get-SafeProperty $props 'plan'
+
+                # Resolve effective retention
+                $effectiveRetention = if ($null -eq $retentionInDays -or $retentionInDays -eq -1) {
+                    $result.WorkspaceDefaultRetentionDays
+                } else {
+                    $retentionInDays
+                }
+
+                $effectiveTotalRetention = if ($null -eq $totalRetentionInDays -or $totalRetentionInDays -eq -1) {
+                    $effectiveRetention
+                } else {
+                    $totalRetentionInDays
+                }
+
+                # Get archive retention days
+                $archiveRetentionInDays = Get-SafeProperty $props 'archiveRetentionInDays'
+                $effectiveArchiveRetention = if ($null -eq $archiveRetentionInDays -or $archiveRetentionInDays -le 0) {
+                    0
+                } else {
+                    $archiveRetentionInDays
+                }
+
+                # Determine if this is a Sentinel solution table
+                $isSentinelTable = $script:SentinelSolutionTables -contains $tableName
+                $isFixedRetention = $script:FixedRetentionTables.ContainsKey($tableName)
+                $usesArchive = ($plan -eq 'Analytics' -and $effectiveArchiveRetention -gt 0)
+
+                $result.Tables[$tableName] = @{
+                    RetentionInDays          = $retentionInDays
+                    TotalRetentionInDays     = $totalRetentionInDays
+                    ArchiveRetentionInDays   = $archiveRetentionInDays
+                    EffectiveRetention       = $effectiveRetention
+                    EffectiveTotalRetention  = $effectiveTotalRetention
+                    EffectiveArchiveRetention = $effectiveArchiveRetention
+                    Plan                     = $plan
+                    IsSentinelTable          = $isSentinelTable
+                    IsFixedRetention         = $isFixedRetention
+                    FreePeriodDays           = if ($isFixedRetention) { $script:FixedRetentionTables[$tableName] } elseif ($isSentinelTable) { 90 } else { 31 }
+                    UsesArchive              = $usesArchive
+                }
+
+                # Track tables with custom retention
+                if ($null -ne $retentionInDays -and $retentionInDays -ne -1 -and $retentionInDays -ne $result.WorkspaceDefaultRetentionDays) {
+                    $result.TablesWithCustomRetention += $tableName
+                }
+
+                # Track tables using archive
+                if ($usesArchive) {
+                    $result.TablesUsingDataLake += $tableName
+                }
+            }
+
+            Write-Verbose "Retrieved retention settings for $($result.Tables.Count) tables"
+        }
+    }
+    catch {
+        $result.ErrorMessage = $_.Exception.Message
+        Write-Verbose "Failed to retrieve table retention settings: $_"
+    }
+
+    return $result
+}
+
+function Get-RetentionCostAnalysis {
+    <#
+    .SYNOPSIS
+    Calculates retention costs for the workspace based on table ingestion and retention settings.
+
+    .DESCRIPTION
+    For each table, calculates analytics tier and archive tier retention costs.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$TableRetention,
+        [Parameter(Mandatory = $true)]
+        [array]$TopTables,
+        [Parameter(Mandatory = $true)]
+        [hashtable]$PricingInfo
+    )
+
+    $result = @{
+        TotalAnalyticsRetentionCost = 0
+        TotalDataLakeRetentionCost  = 0
+        TotalRetentionCost          = 0
+        TableRetentionCosts         = @()
+        RetentionOptimizationTips   = @()
+    }
+
+    $analyticsRate = $PricingInfo.AnalyticsRetentionRate
+    $archiveRate = $PricingInfo.ArchiveRetentionRate
+    $dataLakeStorageRate = $PricingInfo.DataLakeStorageRate
+    $dataLakeIngestionRate = $PricingInfo.DataLakeIngestionRate
+
+    # Skip if we don't have any retention pricing
+    if ($analyticsRate -eq 0 -and $archiveRate -eq 0 -and $dataLakeStorageRate -eq 0) {
+        Write-Verbose "Retention pricing not available - skipping retention cost calculation"
+        return $result
+    }
+
+    $daysPerMonth = 30.44
+
+    foreach ($table in $TopTables) {
+        $tableName = $table.DataType
+        $monthlyGB = [double]$table.TotalGB
+        $dailyGB = $monthlyGB / 30
+
+        # Get retention settings for this table
+        $retention = $null
+        if ($TableRetention.Tables.ContainsKey($tableName)) {
+            $retention = $TableRetention.Tables[$tableName]
+        } else {
+            $isSentinelTable = $script:SentinelSolutionTables -contains $tableName
+            $retention = @{
+                EffectiveRetention      = $TableRetention.WorkspaceDefaultRetentionDays
+                EffectiveTotalRetention = $TableRetention.WorkspaceDefaultRetentionDays
+                IsSentinelTable         = $isSentinelTable
+                IsFixedRetention        = $script:FixedRetentionTables.ContainsKey($tableName)
+                FreePeriodDays          = if ($isSentinelTable) { 90 } else { 31 }
+            }
+        }
+
+        # Skip tables with fixed retention
+        if ($retention.IsFixedRetention) {
+            continue
+        }
+
+        $freePeriod = $retention.FreePeriodDays
+        $analyticsRetention = $retention.EffectiveRetention
+        $totalRetention = $retention.EffectiveTotalRetention
+
+        # Calculate billable analytics retention
+        $analyticsCost = 0
+        $analyticsStoredGB = 0
+        if ($analyticsRetention -gt $freePeriod) {
+            $billableAnalyticsDays = $analyticsRetention - $freePeriod
+            $analyticsStoredGB = $dailyGB * $billableAnalyticsDays
+            $analyticsCost = $analyticsStoredGB * $analyticsRate
+        }
+
+        # Calculate archive/long-term retention cost
+        $archiveCost = 0
+        $archiveStoredGB = 0
+        $usesArchive = $retention.UsesArchive
+        $archiveRetentionDays = if ($retention.EffectiveArchiveRetention) { $retention.EffectiveArchiveRetention } else { 0 }
+
+        if ($usesArchive -and $archiveRetentionDays -gt 0 -and $archiveRate -gt 0) {
+            $archiveStoredGB = $dailyGB * $archiveRetentionDays
+            $archiveCost = $archiveStoredGB * $archiveRate
+        }
+        elseif ($totalRetention -gt $analyticsRetention -and $dataLakeStorageRate -gt 0) {
+            $dataLakeDays = $totalRetention - $analyticsRetention
+            $rawStoredGB = $dailyGB * $dataLakeDays
+            $compressedStorageGB = $rawStoredGB / 6  # 6:1 compression
+            $archiveStoredGB = $rawStoredGB
+            $archiveCost = ($compressedStorageGB * $dataLakeStorageRate) + (($dailyGB * $daysPerMonth) * $dataLakeIngestionRate)
+        }
+
+        $totalTableCost = $analyticsCost + $archiveCost
+
+        if ($totalTableCost -gt 0 -or $analyticsRetention -gt $freePeriod -or $totalRetention -gt $analyticsRetention) {
+            $result.TableRetentionCosts += [PSCustomObject]@{
+                TableName               = $tableName
+                DailyGB                 = [math]::Round($dailyGB, 2)
+                FreePeriodDays          = $freePeriod
+                AnalyticsRetentionDays  = $analyticsRetention
+                ArchiveRetentionDays    = $archiveRetentionDays
+                TotalRetentionDays      = $totalRetention
+                AnalyticsStoredGB       = [math]::Round($analyticsStoredGB, 2)
+                ArchiveStoredGB         = [math]::Round($archiveStoredGB, 2)
+                AnalyticsCost           = [math]::Round($analyticsCost, 2)
+                ArchiveCost             = [math]::Round($archiveCost, 2)
+                TotalCost               = [math]::Round($totalTableCost, 2)
+                IsSentinelTable         = $retention.IsSentinelTable
+                UsesArchive             = $usesArchive
+            }
+        }
+
+        $result.TotalAnalyticsRetentionCost += $analyticsCost
+        $result.TotalDataLakeRetentionCost += $archiveCost
+
+        # Generate optimization tips
+        if ($analyticsCost -gt 50 -and -not $usesArchive -and $archiveRate -gt 0) {
+            $potentialArchiveCost = $analyticsStoredGB * $archiveRate
+            $potentialSavings = $analyticsCost - $potentialArchiveCost
+            if ($potentialSavings -gt 20) {
+                $result.RetentionOptimizationTips += [PSCustomObject]@{
+                    TableName        = $tableName
+                    CurrentCost      = [math]::Round($analyticsCost, 2)
+                    OptimizedCost    = [math]::Round($potentialArchiveCost, 2)
+                    PotentialSavings = [math]::Round($potentialSavings, 2)
+                    Recommendation   = "Move data beyond free period to Archive tier"
+                }
+            }
+        }
+    }
+
+    $result.TotalAnalyticsRetentionCost = [math]::Round($result.TotalAnalyticsRetentionCost, 2)
+    $result.TotalDataLakeRetentionCost = [math]::Round($result.TotalDataLakeRetentionCost, 2)
+    $result.TotalRetentionCost = [math]::Round($result.TotalAnalyticsRetentionCost + $result.TotalDataLakeRetentionCost, 2)
+
+    return $result
+}
+
 #endregion Data Collection Functions
 
 #region Health Check Functions
@@ -1694,6 +3065,134 @@ function Invoke-AllHealthChecks {
                 "$(Format-Plural $agentsWithErrors.Count 'agent') reporting operation errors in the last 7 days."
             }
             Details     = $agentsWithErrors | Select-Object Computer, Failures, Errors, Warnings
+        }
+    }
+
+    # Cost Optimization health checks
+    if ($CollectedData.CostAnalysis -and $CollectedData.PricingInfo) {
+        $costAnalysis = $CollectedData.CostAnalysis
+        $pricing = $CollectedData.PricingInfo
+        $currency = $pricing.Currency
+
+        # COST-001: Pricing Tier Alignment
+        # Check if average ingestion is >2x or <0.5x current tier
+        $avgDailyIngestion = 0
+        if ($CollectedData.IngestionTrend -and $CollectedData.IngestionTrend.Count -gt 0) {
+            $avgDailyIngestion = ($CollectedData.IngestionTrend | Measure-Object -Property TotalGB -Average).Average
+        }
+
+        $currentTierEntry = $costAnalysis.TierComparison | Where-Object { $_.IsCurrent }
+        $tierAlignmentStatus = 'Pass'
+        $tierAlignmentDesc = ''
+
+        if ($currentTierEntry -and $currentTierEntry.TierGB -gt 0) {
+            $ratio = $avgDailyIngestion / $currentTierEntry.TierGB
+            if ($ratio -gt 2) {
+                $tierAlignmentStatus = 'Warning'
+                $tierAlignmentDesc = "Average daily ingestion ($([math]::Round($avgDailyIngestion, 1)) GB) is more than 2× the current commitment tier ($($currentTierEntry.TierGB) GB/day). Consider upgrading to reduce overage costs."
+            } elseif ($ratio -lt 0.5) {
+                $tierAlignmentStatus = 'Warning'
+                $tierAlignmentDesc = "Average daily ingestion ($([math]::Round($avgDailyIngestion, 1)) GB) is less than 50% of the current commitment tier ($($currentTierEntry.TierGB) GB/day). Consider downgrading to reduce unused capacity."
+            } else {
+                $tierAlignmentDesc = "Current commitment tier ($($currentTierEntry.TierGB) GB/day) is well-aligned with average daily ingestion ($([math]::Round($avgDailyIngestion, 1)) GB)."
+            }
+        } elseif ($costAnalysis.CurrentTier -eq 'Pay-As-You-Go') {
+            # Check if commitment tier would be better
+            $optimalTier = $costAnalysis.TierComparison | Where-Object { $_.IsOptimal }
+            if ($optimalTier -and $optimalTier.TierGB -gt 0 -and $costAnalysis.PotentialSavings -gt 100) {
+                $tierAlignmentStatus = 'Info'
+                $tierAlignmentDesc = "Currently on Pay-As-You-Go pricing. A commitment tier ($($optimalTier.Tier)) could save approximately $currency $($costAnalysis.PotentialSavings)/month."
+            } else {
+                $tierAlignmentDesc = "Pay-As-You-Go pricing is appropriate for current ingestion levels ($([math]::Round($avgDailyIngestion, 1)) GB/day average)."
+            }
+        } else {
+            $tierAlignmentDesc = "Current pricing tier: $($costAnalysis.CurrentTier)"
+        }
+
+        $checks += [PSCustomObject]@{
+            CheckId     = 'COST-001'
+            CheckName   = 'Pricing Tier Alignment'
+            Category    = 'Cost Optimization'
+            Status      = $tierAlignmentStatus
+            Severity    = 'Warning'
+            Description = $tierAlignmentDesc
+            Details     = @{
+                CurrentTier     = $costAnalysis.CurrentTier
+                AvgDailyGB      = [math]::Round($avgDailyIngestion, 2)
+                OptimalTier     = $costAnalysis.OptimalTier
+                PotentialSavings = "$currency $($costAnalysis.PotentialSavings)"
+            }
+        }
+
+        # COST-002: E5 Grant Utilization
+        if ($CollectedData.E5LicenseInfo -and $CollectedData.E5LicenseInfo.TotalSeats -gt 0) {
+            $e5Utilization = $costAnalysis.E5GrantUtilization
+            $e5DailyGrant = $costAnalysis.E5DailyGrantGB
+            $e5Eligible = $costAnalysis.E5EligibleIngestionGB
+
+            $e5Status = if ($e5Utilization -eq 0) { 'Warning' }
+                        elseif ($e5Utilization -lt 50) { 'Info' }
+                        else { 'Pass' }
+
+            $e5Desc = if ($e5Utilization -eq 0) {
+                "E5 data grant ($([math]::Round($e5DailyGrant, 2)) GB/day from $($CollectedData.E5LicenseInfo.TotalSeats) licenses) is not being utilized. Ensure eligible data sources (Entra ID, Microsoft 365) are connected."
+            } elseif ($e5Utilization -lt 50) {
+                "E5 data grant is $e5Utilization% utilized ($([math]::Round($e5Eligible, 2)) GB of $([math]::Round($e5DailyGrant, 2)) GB/day available). Consider connecting additional E5-eligible data sources."
+            } else {
+                "E5 data grant is $e5Utilization% utilized ($([math]::Round($e5Eligible, 2)) GB of $([math]::Round($e5DailyGrant, 2)) GB/day available from $($CollectedData.E5LicenseInfo.TotalSeats) licenses)."
+            }
+
+            $checks += [PSCustomObject]@{
+                CheckId     = 'COST-002'
+                CheckName   = 'E5 Grant Utilization'
+                Category    = 'Cost Optimization'
+                Status      = $e5Status
+                Severity    = if ($e5Status -eq 'Warning') { 'Warning' } else { 'Info' }
+                Description = $e5Desc
+                Details     = @{
+                    TotalE5Seats    = $CollectedData.E5LicenseInfo.TotalSeats
+                    DailyGrantGB    = [math]::Round($e5DailyGrant, 2)
+                    EligibleGB      = [math]::Round($e5Eligible, 2)
+                    Utilization     = "$e5Utilization%"
+                    SkuDetails      = $CollectedData.E5LicenseInfo.SkuDetails
+                }
+            }
+        }
+
+        # COST-003: Commitment Tier Savings
+        if ($costAnalysis.PotentialSavings -gt 0) {
+            $savingsPercent = $costAnalysis.PotentialSavingsPercent
+            $checks += [PSCustomObject]@{
+                CheckId     = 'COST-003'
+                CheckName   = 'Commitment Tier Savings'
+                Category    = 'Cost Optimization'
+                Status      = 'Info'
+                Severity    = 'Info'
+                Description = "Switching from $($costAnalysis.CurrentTier) to $($costAnalysis.OptimalTier) could save approximately $currency $($costAnalysis.PotentialSavings)/month ($savingsPercent%)."
+                Details     = @{
+                    CurrentTier     = $costAnalysis.CurrentTier
+                    CurrentCost     = "$currency $($costAnalysis.CurrentMonthlyCost)"
+                    OptimalTier     = $costAnalysis.OptimalTier
+                    OptimalCost     = "$currency $($costAnalysis.OptimalMonthlyCost)"
+                    MonthlySavings  = "$currency $($costAnalysis.PotentialSavings)"
+                    SavingsPercent  = "$savingsPercent%"
+                }
+            }
+        }
+
+        # COST-004: Basic Logs Candidates
+        if ($costAnalysis.BasicLogsCandidates -and $costAnalysis.BasicLogsCandidates.Count -gt 0) {
+            $candidateCount = $costAnalysis.BasicLogsCandidates.Count
+            $totalSavings = ($costAnalysis.BasicLogsCandidates | Measure-Object -Property PotentialSavings -Sum).Sum
+            $checks += [PSCustomObject]@{
+                CheckId     = 'COST-004'
+                CheckName   = 'Basic Logs Candidates'
+                Category    = 'Cost Optimization'
+                Status      = 'Info'
+                Severity    = 'Info'
+                Description = "$(Format-Plural $candidateCount 'table') could be converted to Basic Logs for potential savings of approximately $currency $([math]::Round($totalSavings, 2))/month. Basic Logs have reduced query capabilities but lower ingestion costs."
+                Details     = $costAnalysis.BasicLogsCandidates | Select-Object TableName, MonthlyGB, CurrentCost, BasicCost, PotentialSavings
+            }
         }
     }
 
@@ -4189,6 +5688,694 @@ function ConvertTo-ReportHtml {
         $agentHealthHtml = "<p class='text-muted'>No agent health data available. This may be because KQL queries were skipped or the Heartbeat table has no data.</p>"
     }
 
+    # Build Cost Management section (top-level card)
+    $costManagementHtml = ""
+    if ($Data.CostAnalysis -and $Data.PricingInfo) {
+        $cost = $Data.CostAnalysis
+        $pricing = $Data.PricingInfo
+        $currency = $pricing.Currency
+
+        # Pricing model badge
+        $pricingModelBadge = switch ($cost.PricingModel) {
+            'Simplified' { "<span class='badge bg-success'>Simplified Pricing</span>" }
+            'Classic' { "<span class='badge bg-warning text-dark'>Classic Pricing</span>" }
+            default { "<span class='badge bg-secondary'>Unknown</span>" }
+        }
+
+        # Summary tiles (6 KPIs)
+        $currentCostDisplay = "$currency $([math]::Round($cost.CurrentMonthlyCost, 2))"
+        $optimalCostDisplay = "$currency $([math]::Round($cost.OptimalMonthlyCost, 2))"
+        $savingsDisplay = if ($cost.PotentialSavings -gt 0) { "$currency $([math]::Round($cost.PotentialSavings, 2))" } else { "-" }
+        $savingsPercent = if ($cost.PotentialSavingsPercent -gt 0) { " ($($cost.PotentialSavingsPercent)%)" } else { "" }
+        $e5Display = if ($Data.E5LicenseInfo -and $Data.E5LicenseInfo.TotalSeats -gt 0) { "$($cost.E5GrantUtilization)%" } else { "N/A" }
+        $effectiveIngestionDisplay = "$([math]::Round($cost.EffectiveDailyIngestionGB, 2)) GB/day"
+
+        # Calculate additional display values
+        $totalIngestionGB = [math]::Round($cost.BillableIngestionGB + $cost.FreeIngestionGB, 2)
+        $tierStatusIcon = if ($cost.CurrentTier -eq $cost.OptimalTier) { 'check-circle' } else { 'info' }
+        $tierStatusText = if ($cost.CurrentTier -eq $cost.OptimalTier) { 'Optimal tier' } else { "Consider: $($cost.OptimalTier)" }
+        # Use light colors for dark background
+        $tierStatusColor = if ($cost.CurrentTier -eq $cost.OptimalTier) { '#86efac' } else { '#93c5fd' }
+
+        # E5 progress bar width (capped at 100%)
+        $e5ProgressWidth = [math]::Min($cost.E5GrantUtilization, 100)
+        $e5ProgressClass = if ($cost.E5GrantUtilization -ge 80) { 'bg-success' } elseif ($cost.E5GrantUtilization -ge 50) { 'bg-info' } else { 'bg-warning' }
+
+        $costManagementHtml = @"
+<!-- Cost Summary Header -->
+<div class="row mb-4">
+  <div class="col-lg-4 mb-3 mb-lg-0">
+    <div class="card border-0 shadow-sm h-100" style="background: linear-gradient(135deg, #1a365d 0%, #2d4a6f 100%);">
+      <div class="card-body text-white p-4">
+        <div class="d-flex justify-content-between align-items-start mb-3">
+          <span class="badge $(if ($cost.PricingModel -eq 'Simplified') { 'bg-success' } else { 'bg-warning text-dark' })">$($cost.PricingModel) Pricing</span>
+          <i data-lucide="receipt" style="width:24px;height:24px;opacity:0.7"></i>
+        </div>
+        <p class="text-uppercase small mb-1" style="opacity:0.8;letter-spacing:0.5px;">Estimated Monthly Cost</p>
+        <h2 class="mb-2 fw-bold text-white">$currentCostDisplay</h2>
+        <div class="d-flex align-items-center">
+          <i data-lucide="$tierStatusIcon" class="me-1" style="width:14px;height:14px;color:$tierStatusColor"></i>
+          <small style="color:$tierStatusColor">$($cost.CurrentTier) $(if ($cost.CurrentTier -ne $cost.OptimalTier) { "→ $tierStatusText" })</small>
+        </div>
+        $(if ($cost.PotentialSavings -gt 0) { "<div class='mt-2'><span class='badge bg-warning text-dark'><i data-lucide='trending-down' class='me-1' style='width:12px;height:12px'></i>Save $currency $([math]::Round($cost.PotentialSavings, 2))/mo with $($cost.OptimalTier)</span></div>" })
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-4 mb-3 mb-lg-0">
+    <div class="card border-0 shadow-sm h-100">
+      <div class="card-body p-4">
+        <div class="d-flex justify-content-between align-items-start mb-3">
+          <span class="text-muted text-uppercase small fw-bold">Daily Ingestion</span>
+          <i data-lucide="database" class="text-muted" style="width:20px;height:20px"></i>
+        </div>
+        <div class="mb-3">
+          <span class="h3 fw-bold text-dark">$totalIngestionGB GB</span>
+          <span class="text-muted">/day</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-center mb-2">
+          <small class="text-muted">Billable after deductions</small>
+          <span class="fw-bold text-success">$([math]::Round($cost.EffectiveDailyIngestionGB, 2)) GB</span>
+        </div>
+        <div class="progress" style="height: 8px;">
+          <div class="progress-bar bg-success" style="width: $([math]::Round(($cost.EffectiveDailyIngestionGB / $totalIngestionGB) * 100, 0))%"></div>
+          <div class="progress-bar bg-secondary" style="width: $([math]::Round((($totalIngestionGB - $cost.EffectiveDailyIngestionGB) / $totalIngestionGB) * 100, 0))%; opacity: 0.3;"></div>
+        </div>
+        <small class="text-muted d-block mt-2">$([math]::Round((1 - ($cost.EffectiveDailyIngestionGB / $totalIngestionGB)) * 100, 0))% offset by free tables & grants</small>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-4">
+    <div class="card border-0 shadow-sm h-100">
+      <div class="card-body p-4">
+        <div class="d-flex justify-content-between align-items-start mb-3">
+          <span class="text-muted text-uppercase small fw-bold">E5 Security Grant</span>
+          <i data-lucide="shield-check" class="text-muted" style="width:20px;height:20px"></i>
+        </div>
+        $(if ($Data.E5LicenseInfo -and $Data.E5LicenseInfo.TotalSeats -gt 0) {
+        @"
+        <div class="d-flex align-items-baseline mb-2">
+          <span class="h3 fw-bold text-dark">$($cost.E5GrantUtilization)%</span>
+          <span class="text-muted ms-2">utilized</span>
+        </div>
+        <div class="progress mb-2" style="height: 8px;">
+          <div class="progress-bar $e5ProgressClass" style="width: $e5ProgressWidth%"></div>
+        </div>
+        <div class="row text-center mt-3 pt-2 border-top">
+          <div class="col-4">
+            <small class="text-muted d-block">Seats</small>
+            <span class="fw-bold">$($Data.E5LicenseInfo.TotalSeats)</span>
+          </div>
+          <div class="col-4">
+            <small class="text-muted d-block">Grant</small>
+            <span class="fw-bold">$([math]::Round($cost.E5DailyGrantGB, 2)) GB</span>
+          </div>
+          <div class="col-4">
+            <small class="text-muted d-block">Used</small>
+            <span class="fw-bold text-success">$([math]::Round($cost.E5GrantUsedGB, 2)) GB</span>
+          </div>
+        </div>
+"@
+        } else {
+        @"
+        <div class="text-center py-3">
+          <i data-lucide="shield-off" class="text-muted mb-2" style="width:32px;height:32px"></i>
+          <p class="text-muted mb-0">No E5 licenses detected</p>
+          <small class="text-muted">E5 Security provides 5MB/user/day data grant</small>
+        </div>
+"@
+        })
+      </div>
+    </div>
+  </div>
+</div>
+"@
+
+        # Ingestion Breakdown Section - Visual Waterfall Style
+        $costManagementHtml += @"
+<div id="ingestion-costs" class="mb-4">
+<h5 class="fw-bold text-muted text-uppercase mb-3"><i data-lucide="layers" class="me-2" style="width:16px;height:16px"></i>Ingestion Cost Breakdown</h5>
+<div class="card border-0 bg-light">
+  <div class="card-body p-4">
+    <div class="row align-items-center">
+      <!-- Waterfall breakdown -->
+      <div class="col-lg-8">
+        <div class="d-flex align-items-center mb-3">
+          <div class="d-flex align-items-center justify-content-center rounded-circle bg-primary text-white me-3" style="width:36px;height:36px;flex-shrink:0;">
+            <i data-lucide="database" style="width:18px;height:18px"></i>
+          </div>
+          <div class="flex-grow-1">
+            <div class="d-flex justify-content-between align-items-center">
+              <span class="fw-semibold">Total Daily Ingestion</span>
+              <span class="fw-bold fs-5">$totalIngestionGB GB</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="ms-4 ps-3 border-start border-2" style="border-color: #dee2e6 !important;">
+          <div class="d-flex align-items-center py-2">
+            <i data-lucide="minus-circle" class="text-success me-2" style="width:16px;height:16px"></i>
+            <span class="text-muted flex-grow-1">Free Data Tables</span>
+            <span class="text-success fw-semibold">-$([math]::Round($cost.FreeIngestionGB, 2)) GB</span>
+          </div>
+          $(if ($cost.E5GrantUsedGB -gt 0) { "<div class='d-flex align-items-center py-2'><i data-lucide='minus-circle' class='text-success me-2' style='width:16px;height:16px'></i><span class='text-muted flex-grow-1'>E5 Security Data Grant</span><span class='text-success fw-semibold'>-$([math]::Round($cost.E5GrantUsedGB, 2)) GB</span></div>" })
+          $(if ($cost.P2BenefitAppliedGB -gt 0) { "<div class='d-flex align-items-center py-2'><i data-lucide='minus-circle' class='text-success me-2' style='width:16px;height:16px'></i><span class='text-muted flex-grow-1'>Defender for Servers P2</span><span class='text-success fw-semibold'>-$([math]::Round($cost.P2BenefitAppliedGB, 2)) GB</span></div>" })
+        </div>
+
+        <div class="d-flex align-items-center mt-3 pt-3 border-top">
+          <div class="d-flex align-items-center justify-content-center rounded-circle bg-success text-white me-3" style="width:36px;height:36px;flex-shrink:0;">
+            <i data-lucide="check" style="width:18px;height:18px"></i>
+          </div>
+          <div class="flex-grow-1">
+            <div class="d-flex justify-content-between align-items-center">
+              <span class="fw-semibold">Effective Billable</span>
+              <span class="fw-bold fs-5 text-success">$([math]::Round($cost.EffectiveDailyIngestionGB, 2)) GB/day</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Summary box -->
+      <div class="col-lg-4 mt-4 mt-lg-0">
+        <div class="card border-0 shadow-sm">
+          <div class="card-body text-center p-4">
+            <p class="text-muted small text-uppercase mb-2">Daily Savings</p>
+            <h3 class="text-success mb-2">$([math]::Round($totalIngestionGB - $cost.EffectiveDailyIngestionGB, 2)) GB</h3>
+            <p class="text-muted small mb-0">$([math]::Round((1 - ($cost.EffectiveDailyIngestionGB / $totalIngestionGB)) * 100, 0))% offset by free tables &amp; grants</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<hr class="my-4">
+"@
+
+        # Pricing Tier Comparison Section
+        if ($cost.TierComparison -and $cost.TierComparison.Count -gt 0) {
+            # Filter tiers to show only: current, optimal, and 1 above/below the reference tier
+            $allTiers = @($cost.TierComparison | Sort-Object TierGB)
+            $currentIndex = -1
+            $optimalIndex = -1
+            for ($i = 0; $i -lt $allTiers.Count; $i++) {
+                if ($allTiers[$i].IsCurrent) { $currentIndex = $i }
+                if ($allTiers[$i].IsOptimal) { $optimalIndex = $i }
+            }
+            # Use current tier as reference, or optimal if no current
+            $refIndex = if ($currentIndex -ge 0) { $currentIndex } else { $optimalIndex }
+
+            # Collect indices to show: reference tier, 1 above, 1 below, plus optimal
+            $indicesToShow = @()
+            if ($refIndex -ge 0) {
+                if ($refIndex -gt 0) { $indicesToShow += ($refIndex - 1) }
+                $indicesToShow += $refIndex
+                if ($refIndex -lt ($allTiers.Count - 1)) { $indicesToShow += ($refIndex + 1) }
+            }
+            # Always include optimal tier
+            if ($optimalIndex -ge 0 -and $optimalIndex -notin $indicesToShow) {
+                $indicesToShow += $optimalIndex
+            }
+            $indicesToShow = $indicesToShow | Sort-Object -Unique
+            $filteredTiers = @($indicesToShow | ForEach-Object { $allTiers[$_] })
+
+            $costManagementHtml += @"
+<div id="pricing-tiers" class="mb-4">
+<h5 class="fw-bold text-muted text-uppercase mb-3"><i data-lucide="scale" class="me-2" style="width:16px;height:16px"></i>Pricing Tier Comparison</h5>
+<p class="text-muted small">Estimated monthly costs based on average daily ingestion over the last 30 days. Showing current tier and nearby options.</p>
+<table class="table table-hover table-sm report-table" id="pricingTierTable">
+<thead>
+<tr>
+    <th>Tier</th>
+    <th>Daily Rate</th>
+    <th>Effective $/GB</th>
+    <th>Monthly Base</th>
+    <th>Overage Est.</th>
+    <th>Total Est.</th>
+    <th>vs Current</th>
+</tr>
+</thead>
+<tbody>
+"@
+            foreach ($tier in $filteredTiers) {
+                $rowClass = ""
+                $tierBadge = ""
+                if ($tier.IsCurrent -and $tier.IsOptimal) {
+                    $rowClass = "table-success"
+                    $tierBadge = " <span class='badge bg-success'>Current & Optimal</span>"
+                } elseif ($tier.IsCurrent) {
+                    $rowClass = "table-primary"
+                    $tierBadge = " <span class='badge bg-primary'>Current</span>"
+                } elseif ($tier.IsOptimal) {
+                    $rowClass = "table-info"
+                    $tierBadge = " <span class='badge bg-info'>Recommended</span>"
+                }
+
+                $vsCurrentHtml = if ($tier.VsCurrent -eq 0) {
+                    "-"
+                } elseif ($tier.VsCurrent -lt 0) {
+                    "<span class='text-success fw-bold'>-$currency $([math]::Abs($tier.VsCurrent)) ($($tier.VsCurrentPercent)%)</span>"
+                } else {
+                    "<span class='text-danger'>+$currency $($tier.VsCurrent) (+$($tier.VsCurrentPercent)%)</span>"
+                }
+
+                $dailyRateDisplay = if ($tier.TierGB -eq 0) { "$currency $($tier.DailyRate)/GB" } else { "$currency $($tier.DailyRate)/day" }
+
+                $costManagementHtml += @"
+<tr class="$rowClass">
+    <td><strong>$($tier.Tier)</strong>$tierBadge</td>
+    <td>$dailyRateDisplay</td>
+    <td>$currency $([math]::Round($tier.EffectivePerGB, 4))</td>
+    <td>$currency $($tier.MonthlyEstimate)</td>
+    <td>$(if ($tier.OverageEstimate -gt 0) { "$currency $($tier.OverageEstimate)" } else { "-" })</td>
+    <td><strong>$currency $($tier.TotalEstimate)</strong></td>
+    <td>$vsCurrentHtml</td>
+</tr>
+"@
+            }
+            $costManagementHtml += "</tbody></table></div><hr class='my-4'>"
+        }
+
+        # E5 Grant Analysis Section
+        $costManagementHtml += @"
+<div id="e5-benefit" class="mb-4">
+<h5 class="fw-bold text-muted text-uppercase mb-3"><i data-lucide="gift" class="me-2" style="width:16px;height:16px"></i>E5 Data Grant</h5>
+"@
+        if ($Data.E5LicenseInfo -and $Data.E5LicenseInfo.TotalSeats -gt 0) {
+            $e5Info = $Data.E5LicenseInfo
+
+            # Calculate financial values for E5 grant
+            $e5MonthlyGrantGB = $cost.E5DailyGrantGB * 30
+            $e5MonthlyUsedGB = [math]::Min($cost.E5EligibleIngestionGB, $cost.E5DailyGrantGB) * 30
+            $e5GrantValueMonthly = [math]::Round($e5MonthlyUsedGB * $pricing.PayAsYouGo, 2)
+            $e5FullGrantValue = [math]::Round($e5MonthlyGrantGB * $pricing.PayAsYouGo, 2)
+            $e5UnusedValue = [math]::Round(($e5FullGrantValue - $e5GrantValueMonthly), 2)
+
+            # Determine status color and icon
+            $utilizationColor = if ($cost.E5GrantUtilization -ge 75) { "success" } elseif ($cost.E5GrantUtilization -ge 50) { "warning" } else { "danger" }
+            $utilizationIcon = if ($cost.E5GrantUtilization -ge 75) { "check-circle" } elseif ($cost.E5GrantUtilization -ge 50) { "alert-circle" } else { "alert-triangle" }
+
+            $costManagementHtml += @"
+<p class="text-muted small mb-3">Microsoft 365 E5, A5, F5, and G5 licenses include a 5 MB/user/day data grant for eligible Entra ID and Microsoft 365 data sources.</p>
+
+<!-- E5 Metric Cards -->
+<div class="row g-3 mb-3">
+  <div class="col-6 col-lg-3">
+    <div class="card h-100 border-0 bg-light">
+      <div class="card-body text-center py-3">
+        <div class="text-muted small text-uppercase mb-1"><i data-lucide="users" style="width:14px;height:14px" class="me-1"></i>E5-Tier Licenses</div>
+        <div class="fs-3 fw-bold text-primary">$($e5Info.TotalSeats.ToString('N0'))</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-lg-3">
+    <div class="card h-100 border-0 bg-light">
+      <div class="card-body text-center py-3">
+        <div class="text-muted small text-uppercase mb-1"><i data-lucide="database" style="width:14px;height:14px" class="me-1"></i>Daily Grant</div>
+        <div class="fs-3 fw-bold text-primary">$([math]::Round($cost.E5DailyGrantGB, 1))<span class="fs-6 fw-normal text-muted"> GB</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-lg-3">
+    <div class="card h-100 border-0 bg-light">
+      <div class="card-body text-center py-3">
+        <div class="text-muted small text-uppercase mb-1"><i data-lucide="activity" style="width:14px;height:14px" class="me-1"></i>Avg Daily Usage</div>
+        <div class="fs-3 fw-bold text-primary">$([math]::Round($cost.E5EligibleIngestionGB, 1))<span class="fs-6 fw-normal text-muted"> GB</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-lg-3">
+    <div class="card h-100 border-0 bg-$utilizationColor">
+      <div class="card-body text-center py-3">
+        <div class="$(if ($utilizationColor -eq 'success') { 'text-white-50' } else { 'text-muted' }) small text-uppercase mb-1"><i data-lucide="$utilizationIcon" style="width:14px;height:14px" class="me-1"></i>Utilization</div>
+        <div class="fs-3 fw-bold $(if ($utilizationColor -eq 'success') { 'text-white' })">$($cost.E5GrantUtilization)<span class="fs-6 fw-normal">%</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Financial Impact & Status -->
+<div class="row g-3 mb-3">
+  <div class="col-md-6">
+    <div class="card border-$utilizationColor h-100">
+      <div class="card-body">
+        <div class="d-flex align-items-center mb-2">
+          <i data-lucide="$utilizationIcon" class="text-$utilizationColor me-2" style="width:20px;height:20px"></i>
+          <span class="fw-bold">Grant Utilization Status</span>
+        </div>
+        <div class="progress mb-2" style="height: 8px;">
+          <div class="progress-bar bg-$utilizationColor" role="progressbar" style="width: $([math]::Min(100, $cost.E5GrantUtilization))%"></div>
+        </div>
+        <div class="small text-muted">
+          $(if ($cost.E5GrantUtilization -lt 50) {
+            "Consider connecting additional E5-eligible data sources (Entra ID Sign-in/Audit Logs, Microsoft 365 Activity) to maximize your data grant benefit."
+          } elseif ($cost.E5GrantUtilization -lt 75) {
+            "Moderate utilization. Review E5-eligible data sources to ensure all relevant logs are being collected."
+          } else {
+            "Good utilization of your E5 data grant. The organization is effectively leveraging this license benefit."
+          })
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-6">
+    <div class="card border-0 bg-light h-100">
+      <div class="card-body">
+        <div class="d-flex align-items-center mb-2">
+          <i data-lucide="dollar-sign" class="text-success me-2" style="width:20px;height:20px"></i>
+          <span class="fw-bold">Monthly Benefit Value</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-end">
+          <div>
+            <div class="text-muted small">Grant Value Realized</div>
+            <div class="fs-4 fw-bold text-success">$currency $($e5GrantValueMonthly.ToString('N0'))</div>
+          </div>
+          <div class="text-end">
+            <div class="text-muted small">Full Grant Worth</div>
+            <div class="text-muted">$currency $($e5FullGrantValue.ToString('N0'))/mo</div>
+          </div>
+        </div>
+        $(if ($e5UnusedValue -gt 50) { "<div class='mt-2 small text-warning'><i data-lucide='alert-triangle' style='width:12px;height:12px' class='me-1'></i>~$currency $($e5UnusedValue.ToString('N0'))/mo of grant value unrealized</div>" })
+      </div>
+    </div>
+  </div>
+</div>
+
+$(if ($cost.E5DaysWithOverage -gt 0) { @"
+<!-- Overage Alert -->
+<div class="alert alert-warning d-flex align-items-center mb-3" role="alert">
+  <i data-lucide="trending-up" class="me-2 flex-shrink-0" style="width:20px;height:20px"></i>
+  <div>
+    <strong>Overage Detected:</strong> $($cost.E5DaysWithOverage) of 30 days exceeded the grant cap. Peak overage: $([math]::Round($cost.E5MaxOverageGB, 2)) GB.
+    Days exceeding the grant incur standard ingestion charges for the excess data.
+  </div>
+</div>
+"@ })
+
+<!-- SKU Breakdown (Collapsible) -->
+"@
+            if ($e5Info.SkuDetails -and $e5Info.SkuDetails.Count -gt 0) {
+                $e5CollapseId = "e5SkuCollapse"
+                $costManagementHtml += @"
+<div class="mb-3">
+  <a class="text-decoration-none small" data-bs-toggle="collapse" href="#$e5CollapseId" role="button" aria-expanded="false" aria-controls="$e5CollapseId">
+    <i data-lucide="chevron-right" style="width:14px;height:14px" class="me-1"></i>View License SKU Breakdown ($($e5Info.SkuDetails.Count) SKUs)
+  </a>
+  <div class="collapse mt-2" id="$e5CollapseId">
+    <table class="table table-sm table-bordered mb-0" style="max-width: 450px;">
+      <thead class="table-light"><tr><th>SKU</th><th class="text-end">Enabled</th><th class="text-end">Consumed</th></tr></thead>
+      <tbody>
+"@
+                foreach ($sku in $e5Info.SkuDetails) {
+                    $costManagementHtml += "<tr><td><code class='small'>$($sku.SkuPartNumber)</code></td><td class='text-end'>$($sku.EnabledUnits.ToString('N0'))</td><td class='text-end'>$($sku.ConsumedUnits.ToString('N0'))</td></tr>"
+                }
+                $costManagementHtml += "</tbody></table></div></div>"
+            }
+
+            # E5 Daily Ingestion vs Grant Chart
+            if ($Data.E5DailyIngestion -and $Data.E5DailyIngestion.Count -gt 0) {
+                $e5ChartLabels = @()
+                $e5ChartData = @()
+                $e5GrantLine = @()
+                $e5GrantGB = $cost.E5DailyGrantGB
+
+                foreach ($day in ($Data.E5DailyIngestion | Sort-Object TimeGenerated)) {
+                    $dateLabel = ([datetime]$day.TimeGenerated).ToString("MMM dd")
+                    $e5ChartLabels += "`"$dateLabel`""
+                    $e5ChartData += [math]::Round([double]$day.DailyEligibleGB, 2)
+                    $e5GrantLine += $e5GrantGB
+                }
+
+                $e5LabelsJson = $e5ChartLabels -join ","
+                $e5DataJson = $e5ChartData -join ","
+                $e5GrantJson = $e5GrantLine -join ","
+
+                $costManagementHtml += @"
+<h6 class="mt-4 mb-2">Daily E5-Eligible Ingestion vs Grant Cap</h6>
+<div style="width:100%; height:250px;">
+  <canvas id="e5DailyChart"></canvas>
+</div>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+  const e5Ctx = document.getElementById('e5DailyChart');
+  if (e5Ctx) {
+    new Chart(e5Ctx, {
+      type: 'line',
+      data: {
+        labels: [$e5LabelsJson],
+        datasets: [
+          {
+            label: 'E5-Eligible Ingestion (GB)',
+            data: [$e5DataJson],
+            borderColor: 'rgb(54, 162, 235)',
+            backgroundColor: 'rgba(54, 162, 235, 0.1)',
+            fill: true,
+            tension: 0.3,
+            pointRadius: 2
+          },
+          {
+            label: 'E5 Grant Cap (GB)',
+            data: [$e5GrantJson],
+            borderColor: 'rgb(255, 99, 132)',
+            borderDash: [5, 5],
+            fill: false,
+            pointRadius: 0
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { intersect: false, mode: 'index' },
+        plugins: {
+          legend: { position: 'bottom' },
+          tooltip: {
+            callbacks: {
+              label: function(context) {
+                return context.dataset.label + ': ' + context.parsed.y.toFixed(2) + ' GB';
+              }
+            }
+          }
+        },
+        scales: {
+          y: {
+            beginAtZero: true,
+            title: { display: true, text: 'GB' }
+          }
+        }
+      }
+    });
+  }
+});
+</script>
+"@
+            }
+        } else {
+            $costManagementHtml += @"
+<div class="alert alert-info">
+  <i data-lucide="info" class="me-2" style="width:16px;height:16px"></i>
+  <strong>E5 Data Grant:</strong> No E5/A5/F5/G5 licenses detected. $(if (-not $Data.E5LicenseInfo) { "Graph API permissions may not be configured (Organization.Read.All required)." } else { "If your organization has E5-tier licenses, ensure the Entra ID and Microsoft 365 connectors are enabled to benefit from the included data grant." })
+</div>
+"@
+        }
+        $costManagementHtml += "</div>"
+
+        # Defender for Servers P2 Benefit Section
+        if ($Data.DefenderServersP2 -and $Data.DefenderServersP2.Enabled) {
+            $p2 = $Data.DefenderServersP2
+            $costManagementHtml += @"
+<hr class="my-4">
+<div class="mb-4">
+<h5 class="fw-bold text-muted text-uppercase mb-3"><i data-lucide="shield-check" class="me-2" style="width:16px;height:16px"></i>Defender for Servers P2 Benefit</h5>
+<p class="text-muted small">Defender for Servers P2 includes 500 MB/day per protected VM for security data types.</p>
+<div class="row">
+  <div class="col-md-6">
+    <dl class="row mb-0">
+      <dt class="col-sm-6">P2 Status</dt>
+      <dd class="col-sm-6"><span class="badge bg-success">Enabled</span></dd>
+      <dt class="col-sm-6">Protected VMs</dt>
+      <dd class="col-sm-6"><strong>$($p2.ProtectedVMCount)</strong> $(if ($p2.VMCountMethod) { "($($p2.VMCountMethod))" })</dd>
+      <dt class="col-sm-6">Daily Benefit Available</dt>
+      <dd class="col-sm-6"><strong>$([math]::Round($p2.DailyBenefitGB, 2)) GB</strong></dd>
+      <dt class="col-sm-6">P2-Eligible Ingestion</dt>
+      <dd class="col-sm-6"><strong>$([math]::Round($cost.P2EligibleIngestionGB, 2)) GB/day</strong></dd>
+      <dt class="col-sm-6">Benefit Applied</dt>
+      <dd class="col-sm-6"><strong>$([math]::Round($cost.P2BenefitAppliedGB, 2)) GB/day</strong></dd>
+      <dt class="col-sm-6">Benefit Utilization</dt>
+      <dd class="col-sm-6"><strong>$($cost.P2BenefitUtilization)%</strong></dd>
+    </dl>
+  </div>
+  <div class="col-md-6">
+    <div class="progress" style="height: 25px;">
+      <div class="progress-bar $(if ($cost.P2BenefitUtilization -ge 50) { 'bg-success' } elseif ($cost.P2BenefitUtilization -gt 0) { 'bg-warning' } else { 'bg-secondary' })" role="progressbar" style="width: $([math]::Min(100, $cost.P2BenefitUtilization))%" aria-valuenow="$($cost.P2BenefitUtilization)" aria-valuemin="0" aria-valuemax="100">
+        $($cost.P2BenefitUtilization)% Utilized
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+"@
+        }
+
+        # Cost Optimization Recommendations Section
+        $costManagementHtml += @"
+<hr class="my-4">
+<div id="cost-optimization-recs" class="mb-4">
+<h5 class="fw-bold text-muted text-uppercase mb-3"><i data-lucide="lightbulb" class="me-2" style="width:16px;height:16px"></i>Optimization Recommendations</h5>
+"@
+
+        # Top Tables Cost Analysis
+        if ($cost.TopTablesAnalysis -and $cost.TopTablesAnalysis.Count -gt 0) {
+            $costManagementHtml += @"
+<h6 class="mt-3 mb-2">Top Tables by Cost Impact</h6>
+<table class="table table-hover table-sm report-table" id="topTablesCostTable">
+<thead>
+<tr>
+    <th>Table</th>
+    <th>Monthly GB</th>
+    <th>Free?</th>
+    <th>E5 Eligible?</th>
+    <th>Raw Cost</th>
+    <th>E5 Grant Applied</th>
+    <th>Effective Cost</th>
+</tr>
+</thead>
+<tbody>
+"@
+            foreach ($tbl in $cost.TopTablesAnalysis) {
+                $freeIcon = if ($tbl.IsFree) { "<span class='text-success'><i data-lucide='check' style='width:14px;height:14px'></i></span>" } else { "-" }
+                $e5Icon = if ($tbl.IsE5Eligible) { "<span class='text-info'><i data-lucide='check' style='width:14px;height:14px'></i></span>" } else { "-" }
+                $costManagementHtml += @"
+<tr>
+    <td><code>$($tbl.TableName)</code></td>
+    <td>$($tbl.MonthlyGB)</td>
+    <td>$freeIcon</td>
+    <td>$e5Icon</td>
+    <td>$currency $($tbl.RawMonthlyCost)</td>
+    <td>$(if ($tbl.E5GrantAppliedCost -gt 0) { "<span class='text-success'>-$currency $($tbl.E5GrantAppliedCost)</span>" } else { "-" })</td>
+    <td><strong>$currency $($tbl.EffectiveMonthlyCost)</strong></td>
+</tr>
+"@
+            }
+            $costManagementHtml += "</tbody></table>"
+        }
+
+        # Basic Logs Candidates
+        if ($cost.BasicLogsCandidates -and $cost.BasicLogsCandidates.Count -gt 0) {
+            $totalBasicSavings = ($cost.BasicLogsCandidates | Measure-Object -Property PotentialSavings -Sum).Sum
+            $costManagementHtml += @"
+<h6 class="mt-4 mb-2">Basic Logs Candidates</h6>
+<p class="text-muted small">These high-volume tables could be converted to Basic Logs to reduce costs. Basic Logs have a lower ingestion cost but limited query capabilities (8-day retention, no alerts, limited KQL functions). Potential combined savings: <strong>$currency $([math]::Round($totalBasicSavings, 2))/month</strong>.</p>
+<table class="table table-hover table-sm report-table" id="basicLogsCandidatesTable">
+<thead>
+<tr>
+    <th>Table Name</th>
+    <th>Monthly Volume (GB)</th>
+    <th>Current Cost</th>
+    <th>Basic Logs Cost</th>
+    <th>Potential Savings</th>
+</tr>
+</thead>
+<tbody>
+"@
+            foreach ($candidate in $cost.BasicLogsCandidates) {
+                $costManagementHtml += @"
+<tr>
+    <td><code>$($candidate.TableName)</code></td>
+    <td>$($candidate.MonthlyGB)</td>
+    <td>$currency $($candidate.CurrentCost)</td>
+    <td>$currency $($candidate.BasicCost)</td>
+    <td><span class="text-success fw-bold">$currency $($candidate.PotentialSavings)</span></td>
+</tr>
+"@
+            }
+            $costManagementHtml += "</tbody></table>"
+        }
+
+        # Auxiliary Logs Candidates
+        if ($cost.AuxiliaryLogsCandidates -and $cost.AuxiliaryLogsCandidates.Count -gt 0) {
+            $totalAuxSavings = ($cost.AuxiliaryLogsCandidates | Measure-Object -Property PotentialSavings -Sum).Sum
+            $costManagementHtml += @"
+<h6 class="mt-4 mb-2">Auxiliary Logs Candidates</h6>
+<p class="text-muted small">These tables could be converted to Auxiliary Logs for significant savings. Auxiliary Logs have very low cost but are designed for compliance/audit data with minimal query needs. Potential combined savings: <strong>$currency $([math]::Round($totalAuxSavings, 2))/month</strong>.</p>
+<table class="table table-hover table-sm">
+<thead>
+<tr>
+    <th>Table Name</th>
+    <th>Monthly Volume (GB)</th>
+    <th>Current Cost</th>
+    <th>Auxiliary Cost</th>
+    <th>Potential Savings</th>
+</tr>
+</thead>
+<tbody>
+"@
+            foreach ($candidate in $cost.AuxiliaryLogsCandidates) {
+                $costManagementHtml += @"
+<tr>
+    <td><code>$($candidate.TableName)</code></td>
+    <td>$($candidate.MonthlyGB)</td>
+    <td>$currency $($candidate.CurrentCost)</td>
+    <td>$currency $($candidate.AuxiliaryCost)</td>
+    <td><span class="text-success fw-bold">$currency $($candidate.PotentialSavings)</span></td>
+</tr>
+"@
+            }
+            $costManagementHtml += "</tbody></table>"
+        }
+
+        # Dedicated Cluster Recommendation
+        if ($cost.DedicatedClusterRecommendation) {
+            $cluster = $cost.DedicatedClusterRecommendation
+            if ($cluster.Recommended) {
+                $costManagementHtml += @"
+<div class="alert alert-info mt-4">
+  <h6 class="alert-heading"><i data-lucide="server" class="me-2" style="width:16px;height:16px"></i>Dedicated Cluster Recommendation</h6>
+  <p class="mb-2">Your workspace is ingesting <strong>$($cluster.CurrentDailyIngestion) GB/day</strong>, which exceeds the 100 GB/day threshold for dedicated cluster benefits.</p>
+  <p class="mb-1 small"><strong>Benefits:</strong></p>
+  <ul class="small mb-0">
+    <li>Aggregate data volume across multiple workspaces</li>
+    <li>Share commitment tier across linked workspaces</li>
+    <li>Faster cross-workspace queries</li>
+    <li>Customer-managed keys support</li>
+  </ul>
+</div>
+"@
+            } elseif ($cluster.Reason -eq 'Already linked to cluster') {
+                $costManagementHtml += @"
+<div class="alert alert-success mt-4">
+  <i data-lucide="check-circle" class="me-2" style="width:16px;height:16px"></i>
+  <strong>Dedicated Cluster:</strong> Workspace is linked to cluster <code>$($cluster.ClusterName)</code> (Capacity: $($cluster.ClusterCapacityTier) GB/day).
+</div>
+"@
+            }
+        }
+
+        # Analysis Notes
+        if ($cost.AnalysisNotes -and $cost.AnalysisNotes.Count -gt 0) {
+            $costManagementHtml += @"
+<div class="alert alert-secondary mt-4">
+  <h6 class="alert-heading"><i data-lucide="info" class="me-2" style="width:16px;height:16px"></i>Analysis Notes</h6>
+  <ul class="mb-0 small">
+"@
+            foreach ($note in $cost.AnalysisNotes) {
+                $costManagementHtml += "<li>$([System.Web.HttpUtility]::HtmlEncode($note))</li>"
+            }
+            $costManagementHtml += "</ul></div>"
+        }
+
+        $costManagementHtml += "</div>"  # Close cost-optimization-recs div
+    } else {
+        $costManagementHtml = @"
+<div class="alert alert-info">
+  <i data-lucide="info" class="me-2" style="width:16px;height:16px"></i>
+  <strong>Cost management analysis not available.</strong> This may be because pricing data could not be retrieved for the workspace region, or ingestion data is not available (KQL queries may have been skipped).
+</div>
+"@
+    }
+
     # Build Content Hub solutions table
     $contentHubHtml = @"
 <table class="table table-hover report-table" id="contentHubTable">
@@ -4966,6 +7153,11 @@ function ConvertTo-ReportHtml {
 <li class='ms-3'><a class='nav-link py-1 small' href='#ingestion-analysis'>Ingestion Analysis</a></li>
 <li class='ms-3'><a class='nav-link py-1 small' href='#data-collection-health'>Collection Health</a></li>
 <li class='ms-3'><a class='nav-link py-1 small' href='#agent-health'>Agent Health</a></li>
+<li><a class='nav-link py-1' href='#cost-management'>Cost Management</a></li>
+<li class='ms-3'><a class='nav-link py-1 small' href='#pricing-tiers'>Pricing Tiers</a></li>
+<li class='ms-3'><a class='nav-link py-1 small' href='#ingestion-costs'>Ingestion Costs</a></li>
+<li class='ms-3'><a class='nav-link py-1 small' href='#e5-benefit'>E5 Data Grant</a></li>
+<li class='ms-3'><a class='nav-link py-1 small' href='#cost-optimization-recs'>Optimization</a></li>
 <li><a class='nav-link py-1' href='#content-management'>Content Management</a></li>
 <li class='ms-3'><a class='nav-link py-1 small' href='#content-hub'>Content Hub</a></li>
 <li class='ms-3'><a class='nav-link py-1 small' href='#workbooks'>Workbooks</a></li>
@@ -5145,6 +7337,15 @@ function ConvertTo-ReportHtml {
               $agentErrorsHtml
             </div>
 
+          </div>
+        </div>
+
+        <div class="card shadow-sm section-card" id="cost-management">
+          <div class="card-header bg-white py-3 fw-bold">
+            <i data-lucide="coins" class="me-2" style="width:18px;height:18px"></i> Cost Management
+          </div>
+          <div class="card-body p-4">
+            $costManagementHtml
           </div>
         </div>
 
@@ -5986,6 +8187,20 @@ $collectedData = @{
     # Agent Health (from Heartbeat and Operation tables)
     AgentHealthSummary       = $null
     AgentOperationErrors     = $null
+    # Cost Optimization data
+    E5LicenseInfo            = @{
+        TotalSeats = 0
+        SkuDetails = @()
+    }
+    PricingInfo              = $null
+    CostAnalysis             = $null
+    # Enhanced cost analysis data
+    SentinelPricingModel     = $null
+    DefenderServersP2        = $null
+    DedicatedCluster         = $null
+    E5DailyIngestion         = $null
+    TableRetention           = $null
+    RetentionAnalysis        = $null
 }
 
 # Collect data with progress
@@ -6113,6 +8328,108 @@ if ($collectedData.DataCollectionRules) {
     $collectedData.DataCollectionRules = @()
 }
 
+# Cost optimization data collection
+Write-Host "  Fetching cost optimization data..." -ForegroundColor DarkGray
+
+# Get workspace region and currency for pricing lookup
+$wsLocation = Get-SafeProperty $collectedData.WorkspaceConfig 'location'
+$billingCurrency = Get-RegionCurrencyMapping -Region $wsLocation
+Write-Host "    Workspace region: $wsLocation (Currency: $billingCurrency)" -ForegroundColor DarkGray
+
+# Fetch E5 license information via Graph API
+Write-Host "    Checking E5/A5/F5/G5 licenses via Graph API..." -ForegroundColor DarkGray
+try {
+    $graphToken = Get-GraphAccessToken -Context $context
+    if ($graphToken) {
+        $e5Info = Get-E5LicenseCount -GraphToken $graphToken
+        if ($e5Info) {
+            $collectedData.E5LicenseInfo = $e5Info
+            if ($e5Info.TotalSeats -gt 0) {
+                Write-Host "    Found $(Format-Plural $e5Info.TotalSeats 'E5-tier license') across $($e5Info.SkuDetails.Count) SKU(s)" -ForegroundColor Green
+            } else {
+                Write-Host "    No E5/A5/F5/G5 licenses found" -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "    E5 license data unavailable (Graph API permissions not configured)" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "    Graph API authentication not available - E5 analysis will be skipped" -ForegroundColor Yellow
+    }
+}
+catch {
+    Write-Host "    E5 license data unavailable: $_" -ForegroundColor Yellow
+}
+
+# Fetch Sentinel pricing from Azure Retail Prices API
+Write-Host "    Fetching Sentinel pricing for region $wsLocation..." -ForegroundColor DarkGray
+try {
+    $pricingInfo = Get-SentinelPricingInfo -Region $wsLocation -Currency $billingCurrency
+    if ($pricingInfo) {
+        $collectedData.PricingInfo = $pricingInfo
+        $tierCount = if ($pricingInfo.CommitmentTiers) { $pricingInfo.CommitmentTiers.Count } else { 0 }
+        Write-Host "    Retrieved pricing: PAYG $($billingCurrency) $($pricingInfo.PayAsYouGo)/GB + $(Format-Plural $tierCount 'commitment tier')" -ForegroundColor Green
+    } else {
+        Write-Host "    Pricing data not available for region $wsLocation" -ForegroundColor Yellow
+    }
+}
+catch {
+    Write-Host "    Failed to fetch pricing data: $_" -ForegroundColor Yellow
+}
+
+# Enhanced cost analysis data collection
+Write-Host "    Detecting Sentinel pricing model..." -ForegroundColor DarkGray
+try {
+    $collectedData.SentinelPricingModel = Get-SentinelPricingModel -SubscriptionId $SubscriptionId -ResourceGroupName $ResourceGroupName -WorkspaceName $WorkspaceName -AuthHeader $authHeader
+    if ($collectedData.SentinelPricingModel -and $collectedData.SentinelPricingModel.PricingModel -ne 'Unknown') {
+        Write-Host "    Pricing model: $($collectedData.SentinelPricingModel.PricingModel)" -ForegroundColor Green
+    } else {
+        Write-Host "    Pricing model: Unknown" -ForegroundColor Yellow
+    }
+}
+catch {
+    Write-Host "    Failed to detect pricing model: $_" -ForegroundColor Yellow
+}
+
+Write-Host "    Checking Defender for Servers P2 benefit..." -ForegroundColor DarkGray
+try {
+    # Note: WorkspaceId will be populated later, so we'll update this after KQL queries
+    $collectedData.DefenderServersP2 = Get-DefenderServersP2Benefit -SubscriptionId $SubscriptionId -AuthHeader $authHeader -SkipKqlQueries
+    if ($collectedData.DefenderServersP2 -and $collectedData.DefenderServersP2.Enabled) {
+        Write-Host "    Defender for Servers P2: Enabled" -ForegroundColor Green
+    } else {
+        Write-Host "    Defender for Servers P2: Not enabled or not P2" -ForegroundColor Yellow
+    }
+}
+catch {
+    Write-Host "    Failed to check Defender for Servers P2: $_" -ForegroundColor Yellow
+}
+
+Write-Host "    Checking dedicated cluster status..." -ForegroundColor DarkGray
+try {
+    if ($collectedData.WorkspaceConfig) {
+        $collectedData.DedicatedCluster = Get-DedicatedClusterInfo -WorkspaceConfig $collectedData.WorkspaceConfig -SubscriptionId $SubscriptionId -AuthHeader $authHeader
+        if ($collectedData.DedicatedCluster -and $collectedData.DedicatedCluster.IsLinkedToCluster) {
+            Write-Host "    Dedicated cluster: Linked to $($collectedData.DedicatedCluster.ClusterName)" -ForegroundColor Green
+        } else {
+            Write-Host "    Dedicated cluster: Not linked" -ForegroundColor Yellow
+        }
+    }
+}
+catch {
+    Write-Host "    Failed to check dedicated cluster status: $_" -ForegroundColor Yellow
+}
+
+Write-Host "    Getting table retention settings..." -ForegroundColor DarkGray
+try {
+    $collectedData.TableRetention = Get-TableRetentionSettings -SubscriptionId $SubscriptionId -ResourceGroupName $ResourceGroupName -WorkspaceName $WorkspaceName -AuthHeader $authHeader
+    if ($collectedData.TableRetention -and $collectedData.TableRetention.Tables.Count -gt 0) {
+        Write-Host "    Retrieved retention settings for $(Format-Plural $collectedData.TableRetention.Tables.Count 'table')" -ForegroundColor Green
+    }
+}
+catch {
+    Write-Host "    Failed to get table retention settings: $_" -ForegroundColor Yellow
+}
+
 # KQL queries (if not skipped)
 if (-not $SkipKqlQueries) {
     Write-Host "  Running KQL queries..." -ForegroundColor DarkGray
@@ -6193,6 +8510,35 @@ Usage
         $collectedData.BillableBreakdown = Invoke-SentinelKqlQuery -WorkspaceId $workspaceId -Query $billableQuery
         if ($collectedData.BillableBreakdown) {
             Write-Host "    Billable breakdown: $($collectedData.BillableBreakdown.Count) categories" -ForegroundColor Green
+        }
+
+        # E5 Daily Ingestion query (for accurate overage calculation)
+        $e5DailyQuery = @"
+let E5Tables = dynamic(["SigninLogs", "AuditLogs", "AADNonInteractiveUserSignInLogs", "AADServicePrincipalSignInLogs", "AADManagedIdentitySignInLogs", "AADProvisioningLogs", "ADFSSignInLogs", "McasShadowItReporting", "InformationProtectionLogs_CL", "DeviceEvents", "DeviceFileEvents", "DeviceImageLoadEvents", "DeviceInfo", "DeviceLogonEvents", "DeviceNetworkEvents", "DeviceNetworkInfo", "DeviceProcessEvents", "DeviceRegistryEvents", "DeviceFileCertificateInfo", "DynamicEventCollection", "CloudAppEvents", "EmailAttachmentInfo", "EmailEvents", "EmailPostDeliveryEvents", "EmailUrlInfo", "IdentityLogonEvents", "IdentityQueryEvents", "IdentityDirectoryEvents", "AlertEvidence", "UrlClickEvents"]);
+Usage
+| where TimeGenerated > ago(30d)
+| where DataType in (E5Tables)
+| summarize DailyEligibleGB = sum(Quantity) / 1024 by bin(TimeGenerated, 1d)
+| order by TimeGenerated asc
+"@
+        $collectedData.E5DailyIngestion = Invoke-SentinelKqlQuery -WorkspaceId $workspaceId -Query $e5DailyQuery
+        if ($collectedData.E5DailyIngestion) {
+            Write-Host "    E5 daily ingestion: $($collectedData.E5DailyIngestion.Count) days of data" -ForegroundColor Green
+        }
+
+        # Update Defender for Servers P2 benefit with VM count from KQL
+        if ($collectedData.DefenderServersP2 -and $collectedData.DefenderServersP2.Enabled) {
+            Write-Host "    Counting protected VMs for P2 benefit..." -ForegroundColor DarkGray
+            try {
+                $p2UpdatedResult = Get-DefenderServersP2Benefit -SubscriptionId $SubscriptionId -AuthHeader $authHeader -WorkspaceId $workspaceId
+                $collectedData.DefenderServersP2 = $p2UpdatedResult
+                if ($p2UpdatedResult.ProtectedVMCount -gt 0) {
+                    Write-Host "    P2 benefit: $($p2UpdatedResult.ProtectedVMCount) VMs = $($p2UpdatedResult.DailyBenefitGB) GB/day" -ForegroundColor Green
+                }
+            }
+            catch {
+                Write-Verbose "Failed to update P2 VM count: $_"
+            }
         }
 
         # Alert volume trend (30d)
@@ -6586,6 +8932,40 @@ if ($mitreData) {
         $collectedData.MitreCoverage.ActiveRuleCount = $activeRulesForMitre.Count
         $collectedData.MitreCoverage.TotalRuleCount = $collectedData.AnalyticsRules.Count
         Write-Host "    Coverage: $($collectedData.MitreCoverage.ParentCoveragePercent)% parent techniques" -ForegroundColor $(if ($collectedData.MitreCoverage.ParentCoveragePercent -ge 50) { 'Green' } elseif ($collectedData.MitreCoverage.ParentCoveragePercent -ge 25) { 'Yellow' } else { 'Red' })
+    }
+}
+
+# Run cost optimization analysis (depends on ingestion data from KQL queries)
+if ($collectedData.PricingInfo -and $collectedData.IngestionTrend) {
+    Write-Host "  Running cost optimization analysis..." -ForegroundColor DarkGray
+    $collectedData.CostAnalysis = Invoke-CostOptimizationAnalysis -CollectedData $collectedData
+    if ($collectedData.CostAnalysis) {
+        $currentCost = $collectedData.CostAnalysis.CurrentMonthlyCost
+        $optimalCost = $collectedData.CostAnalysis.OptimalMonthlyCost
+        $savings = $collectedData.CostAnalysis.PotentialSavings
+        $currency = $collectedData.PricingInfo.Currency
+        if ($savings -gt 0) {
+            Write-Host "    Current: $currency $([math]::Round($currentCost, 2))/month | Optimal: $currency $([math]::Round($optimalCost, 2))/month (save $currency $([math]::Round($savings, 2)))" -ForegroundColor Green
+        } else {
+            Write-Host "    Current tier ($($collectedData.CostAnalysis.CurrentTier)) is optimal" -ForegroundColor Green
+        }
+    }
+} else {
+    Write-Host "  Skipping cost optimization analysis (pricing or ingestion data not available)" -ForegroundColor Yellow
+}
+
+# Run retention cost analysis (depends on table retention and top tables data)
+if ($collectedData.TableRetention -and $collectedData.TopTables -and $collectedData.PricingInfo) {
+    Write-Host "  Running retention cost analysis..." -ForegroundColor DarkGray
+    try {
+        $collectedData.RetentionAnalysis = Get-RetentionCostAnalysis -TableRetention $collectedData.TableRetention -TopTables $collectedData.TopTables -PricingInfo $collectedData.PricingInfo
+        if ($collectedData.RetentionAnalysis -and $collectedData.RetentionAnalysis.TotalRetentionCost -gt 0) {
+            $currency = $collectedData.PricingInfo.Currency
+            Write-Host "    Retention costs: $currency $($collectedData.RetentionAnalysis.TotalRetentionCost)/month" -ForegroundColor Green
+        }
+    }
+    catch {
+        Write-Host "    Failed to run retention cost analysis: $_" -ForegroundColor Yellow
     }
 }
 
