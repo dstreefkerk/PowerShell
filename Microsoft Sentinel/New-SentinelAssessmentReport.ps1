@@ -45,6 +45,19 @@
     - MITRE ATT&CK Navigator SVG visualization (requires Python)
     - Optional JSON export of raw collected data
 
+    COST ANALYSIS - CSP/PARTNER PRICING:
+    For CSP (Cloud Solution Provider) and Partner subscriptions, this script attempts to retrieve
+    subscription-specific pricing from the BMX Billing API, which is used by the Azure Portal.
+    This provides accurate pricing for partner channels, which typically have 50-70% discounts
+    compared to public retail rates.
+
+    IMPORTANT: The BMX API is undocumented and may change without notice. When BMX pricing is
+    retrieved successfully, the report will:
+    - Display a "CSP/Partner Pricing" badge in the Cost Management section
+    - Show the discount percentage compared to retail rates
+    - Include a disclaimer about the undocumented API
+    - Fall back to retail pricing if the BMX API is unavailable
+
 .PARAMETER SubscriptionId
     The Azure subscription ID containing the Microsoft Sentinel workspace.
 
@@ -151,6 +164,11 @@
     Azure APIs:
     - https://management.azure.com/ - Azure Resource Manager API for Sentinel/Log Analytics REST calls
     - https://api.loganalytics.io/ - Log Analytics query API for KQL queries
+    - https://service.bmx.azure.com/ - BMX Billing API for subscription-specific pricing (CSP/Partner)
+      NOTE: This is an undocumented Azure Portal API. Used to retrieve accurate pricing for
+      CSP/Partner subscriptions which have different (typically lower) rates than public retail.
+      Falls back to retail pricing if unavailable.
+    - https://prices.azure.com/ - Azure Retail Prices API (fallback for pricing data)
 
     MITRE ATT&CK Data:
     - https://raw.githubusercontent.com/mitre/cti/master/enterprise-attack/enterprise-attack.json
@@ -1151,10 +1169,13 @@ function Get-E5LicenseCount {
     )
 
     # E5-tier SKU part numbers that include the 5MB/user/day Sentinel data grant
+    # See: https://azure.microsoft.com/en-us/pricing/offers/sentinel-microsoft-365-offer/
+    # NOTE: E3 licenses do NOT qualify for the Sentinel data grant
     $e5SkuPartNumbers = @(
         'SPE_E5',                    # Microsoft 365 E5
         'ENTERPRISEPREMIUM',         # Office 365 E5
         'M365_E5',                   # Microsoft 365 E5 (alternate)
+        'Microsoft_365_E5_(no_Teams)', # Microsoft 365 E5 without Teams (separate Teams licensing)
         'IDENTITY_THREAT_PROTECTION', # Microsoft 365 E5 Security
         'M365_E5_SUITE_COMPONENTS',  # Microsoft 365 E5 Suite features
         'SPE_E5_NOPSTNCONF',         # Microsoft 365 E5 without Audio Conferencing
@@ -1162,12 +1183,14 @@ function Get-E5LicenseCount {
         'SPE_F5_SEC',                # Microsoft 365 F5 Security Add-on
         'SPE_F5_SECCOMP',            # Microsoft 365 F5 Security + Compliance Add-on
         'M365_G5_GCC',               # Microsoft 365 G5 GCC
+        'SPE_E5_GCC',                # Microsoft 365 E5 GCC (Government)
         'SPE_E5_GOV',                # Microsoft 365 E5 Government
         'MICROSOFT_365_E5_DEVELOPER', # Microsoft 365 E5 Developer
         'M365EDU_A5_STUDENT',        # Microsoft 365 A5 for students
         'M365EDU_A5_FACULTY',        # Microsoft 365 A5 for faculty
         'M365EDU_A5_STUUSEBNFT',     # Microsoft 365 A5 student use benefit
-        'SPE_E5_CALLINGMINUTES'      # Microsoft 365 E5 with calling minutes
+        'SPE_E5_CALLINGMINUTES',     # Microsoft 365 E5 with calling minutes
+        'INFORMATION_PROTECTION_COMPLIANCE' # Microsoft 365 E5 Compliance
     )
 
     try {
@@ -1276,24 +1299,272 @@ function Get-RegionCurrencyMapping {
     return 'USD'
 }
 
+function Get-ExchangeRate {
+    <#
+    .SYNOPSIS
+    Fetches the current USD exchange rate for a target currency.
+
+    .DESCRIPTION
+    This function retrieves exchange rates from free public APIs to convert USD pricing
+    to the target currency. It uses a multi-tier fallback approach:
+    1. Primary: fawazahmed0/currency-api via jsdelivr CDN
+    2. Fallback: fawazahmed0/currency-api via pages.dev
+    3. Secondary: ExchangeRate-API Open Access
+
+    .PARAMETER TargetCurrency
+    The target currency code (e.g., 'AUD', 'EUR', 'GBP').
+
+    .OUTPUTS
+    Hashtable with Rate, Date, Source, TargetCurrency, or $null on failure.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TargetCurrency
+    )
+
+    # Normalize currency code
+    $targetLower = $TargetCurrency.ToLower()
+    $targetUpper = $TargetCurrency.ToUpper()
+
+    # If target is USD, no conversion needed
+    if ($targetUpper -eq 'USD') {
+        Write-Verbose "Target currency is USD - no conversion needed"
+        return @{
+            Rate           = 1.0
+            Date           = (Get-Date).ToString('yyyy-MM-dd')
+            Source         = 'None (USD)'
+            TargetCurrency = 'USD'
+        }
+    }
+
+    $timeout = 10  # seconds
+
+    # Primary API: fawazahmed0/currency-api via jsdelivr CDN
+    $primaryUrl = "https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json"
+    $fallbackUrl = "https://latest.currency-api.pages.dev/v1/currencies/usd.json"
+
+    foreach ($url in @($primaryUrl, $fallbackUrl)) {
+        try {
+            Write-Verbose "Trying exchange rate API: $url"
+            $response = Invoke-RestMethod -Uri $url -Method Get -TimeoutSec $timeout -ErrorAction Stop
+
+            if ($response -and $response.usd -and $response.usd.$targetLower) {
+                $rate = [double]$response.usd.$targetLower
+                $date = if ($response.date) { $response.date } else { (Get-Date).ToString('yyyy-MM-dd') }
+
+                Write-Verbose "Exchange rate retrieved: 1 USD = $rate $targetUpper (Date: $date)"
+                return @{
+                    Rate           = $rate
+                    Date           = $date
+                    Source         = 'fawazahmed0/currency-api'
+                    TargetCurrency = $targetUpper
+                }
+            }
+            else {
+                Write-Verbose "Currency '$targetUpper' not found in response from $url"
+            }
+        }
+        catch {
+            Write-Verbose "Failed to fetch from $url : $_"
+        }
+    }
+
+    # Secondary fallback: ExchangeRate-API Open Access
+    $secondaryUrl = "https://open.er-api.com/v6/latest/USD"
+    try {
+        Write-Verbose "Trying secondary exchange rate API: $secondaryUrl"
+        $response = Invoke-RestMethod -Uri $secondaryUrl -Method Get -TimeoutSec $timeout -ErrorAction Stop
+
+        if ($response -and $response.result -eq 'success' -and $response.rates -and $response.rates.$targetUpper) {
+            $rate = [double]$response.rates.$targetUpper
+            $date = if ($response.time_last_update_utc) {
+                try { ([datetime]$response.time_last_update_utc).ToString('yyyy-MM-dd') } catch { (Get-Date).ToString('yyyy-MM-dd') }
+            } else { (Get-Date).ToString('yyyy-MM-dd') }
+
+            Write-Verbose "Exchange rate retrieved from secondary API: 1 USD = $rate $targetUpper (Date: $date)"
+            return @{
+                Rate           = $rate
+                Date           = $date
+                Source         = 'ExchangeRate-API'
+                TargetCurrency = $targetUpper
+            }
+        }
+        else {
+            Write-Verbose "Currency '$targetUpper' not found in secondary API response"
+        }
+    }
+    catch {
+        Write-Verbose "Failed to fetch from secondary API: $_"
+    }
+
+    Write-Verbose "All exchange rate APIs failed for currency '$targetUpper'"
+    return $null
+}
+
 function Get-SentinelPricingInfo {
     <#
     .SYNOPSIS
-    Retrieves Microsoft Sentinel pricing information from the Azure Retail Prices API.
+    Retrieves Microsoft Sentinel pricing information, trying BMX API first for CSP/Partner subscriptions.
+
+    .DESCRIPTION
+    This function retrieves pricing information for Microsoft Sentinel. When SubscriptionId and Context
+    are provided with -TryBmxPricing, it first attempts to get subscription-specific pricing from the
+    BMX Billing API (used by Azure Portal), which returns actual rates for CSP/Partner subscriptions.
+    If BMX fails or is not requested, it falls back to the Azure Retail Prices API.
+
+    NOTE: The BMX API is undocumented and may change without notice.
     #>
     param(
         [Parameter(Mandatory = $true)]
         [string]$Region,
 
         [Parameter(Mandatory = $false)]
-        [string]$Currency = 'USD'
+        [string]$Currency = 'USD',
+
+        [Parameter(Mandatory = $false)]
+        [string]$SubscriptionId,
+
+        [Parameter(Mandatory = $false)]
+        [object]$Context,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$TryBmxPricing
     )
 
+    # Initialize result with default values
+    $result = @{
+        Region                 = $Region
+        Currency               = $Currency
+        PayAsYouGo             = 0
+        CommitmentTiers        = @()
+        BasicLogsRate          = 0
+        AuxiliaryLogsRate      = 0
+        AnalyticsRetentionRate = 0
+        ArchiveRetentionRate   = 0
+        DataLakeStorageRate    = 0
+        DataLakeIngestionRate  = 0
+        CurrentRetailPrices    = @()
+        # BMX-specific fields
+        PricingSource          = 'Retail'
+        Channel                = $null
+        IsPartnerPricing       = $false
+        RetailComparison       = $null
+        BmxApiDisclaimer       = $null
+        # Currency conversion fields
+        ExchangeRate           = $null
+        OriginalCurrency       = $null
+        ConvertedCurrency      = $null
+        ConversionApplied      = $false
+        ExchangeRateDate       = $null
+        ExchangeRateSource     = $null
+    }
+
+    # Track retail pricing for comparison (if we use BMX)
+    $retailPayAsYouGo = $null
+    $retailCommitmentTiers = @()
+
+    # Try BMX pricing first if requested and we have the required parameters
+    $bmxPricing = $null
+    if ($TryBmxPricing -and $SubscriptionId -and $Context) {
+        Write-Verbose "Attempting BMX pricing for subscription $SubscriptionId"
+        $bmxPricing = Get-BmxSubscriptionPricing -SubscriptionId $SubscriptionId -Context $Context
+
+        if ($bmxPricing -and $bmxPricing.Sentinel.PayAsYouGo) {
+            Write-Verbose "BMX pricing retrieved successfully - Channel: $($bmxPricing.Channel)"
+
+            # Use BMX pricing
+            $result.PricingSource = 'BMX'
+            $result.Channel = $bmxPricing.Channel
+            $result.IsPartnerPricing = $bmxPricing.IsPartnerPricing
+            $result.PayAsYouGo = $bmxPricing.Sentinel.PayAsYouGo
+            $result.BmxApiDisclaimer = "Pricing retrieved from undocumented BMX Billing API - verify in Azure Portal"
+
+            # Override currency if BMX returned one
+            if ($bmxPricing.Currency) {
+                $result.Currency = $bmxPricing.Currency
+            }
+
+            # Convert BMX commitment tiers to the expected format
+            $bmxTiers = @()
+            foreach ($tierGB in ($bmxPricing.Sentinel.CommitmentTiers.Keys | Sort-Object)) {
+                $tier = $bmxPricing.Sentinel.CommitmentTiers[$tierGB]
+                $bmxTiers += [PSCustomObject]@{
+                    TierGB         = $tierGB
+                    DailyRate      = $tier.DailyRate
+                    EffectivePerGB = $tier.EffectivePerGB
+                }
+            }
+            $result.CommitmentTiers = $bmxTiers
+
+            # Set data retention rate if available
+            if ($bmxPricing.Sentinel.DataRetention) {
+                $result.AnalyticsRetentionRate = $bmxPricing.Sentinel.DataRetention
+            }
+
+            # BMX API returns USD pricing - convert to target currency if different
+            if ($Currency -ne 'USD') {
+                Write-Verbose "BMX pricing is in USD, target currency is $Currency - attempting conversion"
+                $exchangeRate = Get-ExchangeRate -TargetCurrency $Currency
+
+                if ($exchangeRate -and $exchangeRate.Rate) {
+                    $rate = $exchangeRate.Rate
+                    Write-Verbose "Converting BMX pricing from USD to $Currency at rate $rate"
+
+                    # Store original USD values for reference
+                    $result.OriginalCurrency = 'USD'
+                    $result.ConvertedCurrency = $Currency
+                    $result.ExchangeRate = $rate
+                    $result.ExchangeRateDate = $exchangeRate.Date
+                    $result.ExchangeRateSource = $exchangeRate.Source
+                    $result.ConversionApplied = $true
+
+                    # Convert PAYG rate
+                    $result.PayAsYouGo = [math]::Round($result.PayAsYouGo * $rate, 4)
+
+                    # Convert commitment tier rates
+                    $convertedTiers = @()
+                    foreach ($tier in $result.CommitmentTiers) {
+                        $convertedTiers += [PSCustomObject]@{
+                            TierGB         = $tier.TierGB
+                            DailyRate      = [math]::Round($tier.DailyRate * $rate, 2)
+                            EffectivePerGB = [math]::Round($tier.EffectivePerGB * $rate, 4)
+                        }
+                    }
+                    $result.CommitmentTiers = $convertedTiers
+
+                    # Convert retention rate if set
+                    if ($result.AnalyticsRetentionRate -gt 0) {
+                        $result.AnalyticsRetentionRate = [math]::Round($result.AnalyticsRetentionRate * $rate, 4)
+                    }
+
+                    # Update currency to target
+                    $result.Currency = $Currency
+                    Write-Verbose "Currency conversion applied: 1 USD = $rate $Currency"
+                }
+                else {
+                    Write-Verbose "Exchange rate not available - keeping BMX pricing in USD"
+                    $result.Currency = 'USD'
+                }
+            }
+        }
+        else {
+            Write-Verbose "BMX pricing not available or incomplete - falling back to retail API"
+        }
+    }
+
+    # Always fetch retail pricing (for fallback or comparison)
+    # If BMX returned a different currency, use that for accurate comparison
+    $retailCurrency = $Currency
+    if ($result.PricingSource -eq 'BMX' -and $result.Currency -and $result.Currency -ne $Currency) {
+        Write-Verbose "BMX returned currency '$($result.Currency)' differs from region currency '$Currency' - fetching retail prices in BMX currency for accurate comparison"
+        $retailCurrency = $result.Currency
+    }
+
     try {
-        # Build the API filter for Sentinel pricing
         $baseUri = "https://prices.azure.com/api/retail/prices?api-version=2023-01-01-preview"
         $filter = "armRegionName eq '$Region' and serviceName eq 'Sentinel'"
-        $uri = "$baseUri&currencyCode=$Currency&`$filter=$filter"
+        $uri = "$baseUri&currencyCode=$retailCurrency&`$filter=$filter"
 
         $allPrices = @()
         do {
@@ -1304,7 +1575,7 @@ function Get-SentinelPricingInfo {
             $uri = $response.NextPageLink
         } while ($uri)
 
-        # Parse pricing tiers
+        # Parse retail pricing tiers
         $payAsYouGo = 0
         $commitmentTiers = @()
         $basicLogsRate = 0
@@ -1317,24 +1588,23 @@ function Get-SentinelPricingInfo {
         foreach ($price in $allPrices) {
             $meterName = $price.meterName
             $unitPrice = $price.unitPrice
-            $skuName = $price.skuName
 
             # Skip reserved/spot pricing
             if ($price.type -eq 'Reservation' -or $price.type -eq 'DevTestConsumption') {
                 continue
             }
 
-            # Pay-As-You-Go (Analysis) - meter name is "Pay-as-you-go Analysis" or just "Analysis"
+            # Pay-As-You-Go (Analysis)
             if ($meterName -match '(^Analysis$|Pay-as-you-go Analysis)' -and $unitPrice -gt 0) {
                 $payAsYouGo = $unitPrice
             }
-            # Commitment tiers - match with or without "Capacity Reservation" suffix
+            # Commitment tiers
             elseif ($meterName -match '^(\d+) GB Commitment Tier') {
                 $tierGB = [int]$matches[1]
                 $effectivePerGB = if ($tierGB -gt 0) { [math]::Round($unitPrice / $tierGB, 4) } else { 0 }
                 $commitmentTiers += [PSCustomObject]@{
-                    TierGB        = $tierGB
-                    DailyRate     = $unitPrice
+                    TierGB         = $tierGB
+                    DailyRate      = $unitPrice
                     EffectivePerGB = $effectivePerGB
                 }
             }
@@ -1346,7 +1616,7 @@ function Get-SentinelPricingInfo {
             elseif ($meterName -match 'Auxiliary Logs') {
                 $auxiliaryLogsRate = $unitPrice
             }
-            # Interactive/Analytics Data Retention (beyond free period)
+            # Interactive/Analytics Data Retention
             elseif ($meterName -match 'Interactive Data Retention|Analytics Data Retention|Data Retention' -and $unitPrice -gt 0) {
                 $analyticsRetentionRate = $unitPrice
             }
@@ -1372,30 +1642,255 @@ function Get-SentinelPricingInfo {
         }
 
         # If PAYG wasn't found directly, estimate from the 100GB tier
-        # (PAYG is typically ~15-20% more expensive than the lowest commitment tier)
         if ($payAsYouGo -eq 0 -and $commitmentTiers.Count -gt 0) {
             $lowestTier = $commitmentTiers[0]
-            # Estimate PAYG as ~18% higher than the lowest tier effective rate
             $payAsYouGo = [math]::Round($lowestTier.EffectivePerGB * 1.18, 4)
             Write-Verbose "PAYG rate not found directly - estimated from lowest tier: $payAsYouGo"
         }
 
-        return @{
-            Region                 = $Region
-            Currency               = $Currency
-            PayAsYouGo             = $payAsYouGo
-            CommitmentTiers        = $commitmentTiers
-            BasicLogsRate          = $basicLogsRate
-            AuxiliaryLogsRate      = $auxiliaryLogsRate
-            AnalyticsRetentionRate = $analyticsRetentionRate
-            ArchiveRetentionRate   = $archiveRetentionRate
-            DataLakeStorageRate    = $dataLakeStorageRate
-            DataLakeIngestionRate  = $dataLakeIngestionRate
-            CurrentRetailPrices    = $allPrices
+        # Store retail prices for reference
+        $retailPayAsYouGo = $payAsYouGo
+        $retailCommitmentTiers = $commitmentTiers
+        $result.CurrentRetailPrices = $allPrices
+
+        # If we're using BMX pricing, calculate retail comparison
+        if ($result.PricingSource -eq 'BMX' -and $retailPayAsYouGo -gt 0 -and $result.PayAsYouGo -gt 0) {
+            $discountPercent = [math]::Round((1 - ($result.PayAsYouGo / $retailPayAsYouGo)) * 100, 0)
+            $result.RetailComparison = @{
+                PayAsYouGo = $retailPayAsYouGo
+                DiscountPercent = $discountPercent
+                CommitmentTiers = $retailCommitmentTiers
+                Currency = $retailCurrency
+            }
+            Write-Verbose "BMX vs Retail: PAYG $($result.Currency) $($result.PayAsYouGo) vs $retailCurrency $retailPayAsYouGo ($discountPercent% discount)"
         }
+
+        # If we didn't get BMX pricing, use retail pricing
+        if ($result.PricingSource -ne 'BMX') {
+            $result.PayAsYouGo = $payAsYouGo
+            $result.CommitmentTiers = $commitmentTiers
+            $result.BasicLogsRate = $basicLogsRate
+            $result.AuxiliaryLogsRate = $auxiliaryLogsRate
+            $result.AnalyticsRetentionRate = $analyticsRetentionRate
+            $result.ArchiveRetentionRate = $archiveRetentionRate
+            $result.DataLakeStorageRate = $dataLakeStorageRate
+            $result.DataLakeIngestionRate = $dataLakeIngestionRate
+        }
+        else {
+            # Fill in rates that BMX doesn't provide
+            if ($result.BasicLogsRate -eq 0) { $result.BasicLogsRate = $basicLogsRate }
+            if ($result.AuxiliaryLogsRate -eq 0) { $result.AuxiliaryLogsRate = $auxiliaryLogsRate }
+            if ($result.AnalyticsRetentionRate -eq 0) { $result.AnalyticsRetentionRate = $analyticsRetentionRate }
+            if ($result.ArchiveRetentionRate -eq 0) { $result.ArchiveRetentionRate = $archiveRetentionRate }
+            if ($result.DataLakeStorageRate -eq 0) { $result.DataLakeStorageRate = $dataLakeStorageRate }
+            if ($result.DataLakeIngestionRate -eq 0) { $result.DataLakeIngestionRate = $dataLakeIngestionRate }
+        }
+
+        return $result
     }
     catch {
         Write-Verbose "Failed to retrieve Sentinel pricing information: $_"
+
+        # If we have BMX pricing, return that even if retail failed
+        if ($result.PricingSource -eq 'BMX' -and $result.PayAsYouGo -gt 0) {
+            Write-Verbose "Returning BMX pricing despite retail API failure"
+            return $result
+        }
+
+        return $null
+    }
+}
+
+function Get-BmxSubscriptionPricing {
+    <#
+    .SYNOPSIS
+    Retrieves subscription-specific pricing from the BMX Billing API.
+
+    .DESCRIPTION
+    The BMX API is an undocumented Azure Portal API that returns actual
+    subscription pricing, which may differ from retail for CSP/Partner
+    subscriptions. This function attempts to call the API and returns
+    $null if it fails (falling back to retail pricing).
+
+    WARNING: This API is undocumented and may change without notice.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SubscriptionId,
+
+        [Parameter(Mandatory = $true)]
+        [object]$Context
+    )
+
+    try {
+        Write-Verbose "Attempting BMX Billing API call for subscription $SubscriptionId"
+
+        # Get access token for management.core.windows.net (portal uses this resource)
+        $tokenRequest = $null
+        $resourcesToTry = @(
+            "https://management.core.windows.net/"   # Classic ARM resource (portal uses this)
+            "https://management.azure.com/"          # Modern ARM resource
+        )
+
+        foreach ($resource in $resourcesToTry) {
+            try {
+                Write-Verbose "  Trying resource: $resource"
+                $tokenRequest = [Microsoft.Azure.Commands.Common.Authentication.AzureSession]::Instance.AuthenticationFactory.Authenticate(
+                    $Context.Account,
+                    $Context.Environment,
+                    $Context.Tenant.Id,
+                    $null,
+                    "Never",
+                    $null,
+                    $resource
+                )
+
+                if ($tokenRequest -and $tokenRequest.AccessToken) {
+                    Write-Verbose "  Token acquired for resource: $resource"
+                    break
+                }
+            }
+            catch {
+                Write-Verbose "  Failed for resource $resource : $_"
+            }
+        }
+
+        if (-not $tokenRequest -or -not $tokenRequest.AccessToken) {
+            Write-Verbose "Failed to obtain access token for BMX API"
+            return $null
+        }
+
+        $accessToken = $tokenRequest.AccessToken
+
+        # Build portal-like request headers
+        $headers = @{
+            "Accept"            = "*/*"
+            "Accept-Language"   = "en-AU,en-GB;q=0.9,en;q=0.8,en-US;q=0.7"
+            "Referer"           = "https://portal.azure.com/"
+            "x-ms-command-name" = "POST"
+            "Origin"            = "https://portal.azure.com"
+            "Sec-Fetch-Dest"    = "empty"
+            "Sec-Fetch-Mode"    = "cors"
+            "Sec-Fetch-Site"    = "same-site"
+            "Authorization"     = "Bearer $accessToken"
+            "Content-Type"      = "application/json; charset=utf-8"
+            "User-Agent"        = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0"
+        }
+
+        # Define all pricing specs with their meter IDs
+        # Note: JSON must use camelCase property names and "resourceId" (not "id") for meter GUIDs
+        $pricingSpecs = @(
+            # Sentinel Pay-As-You-Go
+            @{ SpecId = "Sentinel_PerGB_undefined"; MeterId = "ba63c8c9-1497-4574-98c7-1601008058df" }
+            # Sentinel Commitment Tiers
+            @{ SpecId = "Sentinel_CapacityReservation_100"; MeterId = "7f2cdd61-1d47-434c-9724-8c472c0b6c4d" }
+            @{ SpecId = "Sentinel_CapacityReservation_200"; MeterId = "226c315d-081c-4664-bd30-7aab3a95af7a" }
+            @{ SpecId = "Sentinel_CapacityReservation_300"; MeterId = "ed156e52-9f40-4d04-9633-4cb439ce8146" }
+            @{ SpecId = "Sentinel_CapacityReservation_400"; MeterId = "a3db0156-381d-4447-93c2-c83a09fc91d2" }
+            @{ SpecId = "Sentinel_CapacityReservation_500"; MeterId = "6f94a44a-8666-47eb-b525-b32b03d552f1" }
+            @{ SpecId = "Sentinel_CapacityReservation_1000"; MeterId = "b402ee61-5b5a-52d6-bff7-5610628f79bf" }
+            @{ SpecId = "Sentinel_CapacityReservation_2000"; MeterId = "4b6ef9c7-2e95-50c0-ab2f-49efa28192c8" }
+            @{ SpecId = "Sentinel_CapacityReservation_5000"; MeterId = "c2dabf54-28ea-5c0d-9d05-4dfcc3fa8886" }
+            @{ SpecId = "Sentinel_CapacityReservation_10000"; MeterId = "27ae06be-4db9-5a44-9b48-aa485d7cd81f" }
+            # Sentinel Data Retention
+            @{ SpecId = "Sentinel_LogDataRetention_undefined"; MeterId = "a2a785e5-3725-47b2-b678-5ebffdc2e010" }
+            # Log Analytics Pay-As-You-Go
+            @{ SpecId = "LogAnalytics_PerGB_undefined"; MeterId = "d8a62258-b892-4184-9003-5ac0fdd62729" }
+            # Log Analytics Commitment Tiers
+            @{ SpecId = "LogAnalytics_CapacityReservation_100"; MeterId = "c5eaee81-4584-4608-990c-bfc1c19d89e4" }
+            @{ SpecId = "LogAnalytics_CapacityReservation_200"; MeterId = "d1c6f8c2-4879-4dc4-8933-5221a3c2f100" }
+            @{ SpecId = "LogAnalytics_CapacityReservation_300"; MeterId = "5868b173-0fae-4275-a3f9-d6b4b338e963" }
+            @{ SpecId = "LogAnalytics_CapacityReservation_400"; MeterId = "080711b2-3ef5-4bb3-9454-6c3a2e090ed5" }
+            @{ SpecId = "LogAnalytics_CapacityReservation_500"; MeterId = "671b7903-245b-496b-9857-f2b065c61a4d" }
+            @{ SpecId = "LogAnalytics_CapacityReservation_1000"; MeterId = "7a37973a-05f5-5317-b257-4630d73f4034" }
+            @{ SpecId = "LogAnalytics_CapacityReservation_2000"; MeterId = "842afaae-1ca5-5b10-b2d4-3effdd60aeb1" }
+            @{ SpecId = "LogAnalytics_CapacityReservation_5000"; MeterId = "a917f858-542a-55af-8cc6-aff967f78cdb" }
+            @{ SpecId = "LogAnalytics_CapacityReservation_10000"; MeterId = "c4e32986-e3db-5998-a141-a5956ffe7ffa" }
+        )
+
+        # Build JSON array of specs - using direct JSON string to ensure correct camelCase
+        $specsJsonArray = $pricingSpecs | ForEach-Object {
+            "{`"id`":`"$($_.SpecId)`",`"firstParty`":[{`"resourceId`":`"$($_.MeterId)`",`"quantity`":100}]}"
+        }
+        $specsJson = $specsJsonArray -join ","
+
+        # Build complete request body matching portal format exactly
+        $bodyJson = "{`"subscriptionId`":`"$SubscriptionId`",`"specResourceSets`":[$specsJson],`"specsToAllowZeroCost`":[],`"specType`":`"Microsoft_Azure_SentinelUS`",`"IsRpcCall`":false}"
+
+        # Call BMX API
+        $bmxUri = "https://service.bmx.azure.com/api/Billing/Subscription/GetSpecsCosts?apiVersion=2019-01-14"
+        Write-Verbose "Calling BMX API: $bmxUri"
+
+        $response = Invoke-RestMethod -Uri $bmxUri -Method POST -Headers $headers -Body $bodyJson -ErrorAction Stop
+
+        # Check if response was successful
+        if (-not $response.isSuccess) {
+            Write-Verbose "BMX API returned isSuccess=false"
+            return $null
+        }
+
+        # Parse BMX pricing into a structured format
+        $bmxPricing = @{
+            Channel = $response.channel
+            Currency = $null
+            IsPartnerPricing = ($response.channel -eq 'GtmPartner')
+            Sentinel = @{
+                PayAsYouGo = $null
+                CommitmentTiers = @{}
+                DataRetention = $null
+            }
+            LogAnalytics = @{
+                PayAsYouGo = $null
+                CommitmentTiers = @{}
+            }
+        }
+
+        foreach ($cost in $response.costs) {
+            # Get currency from first cost item
+            if (-not $bmxPricing.Currency -and $cost.firstParty -and $cost.firstParty[0].meters) {
+                $bmxPricing.Currency = $cost.currencyCode
+            }
+
+            $perGbPrice = $null
+            if ($cost.firstParty -and $cost.firstParty[0].meters -and $cost.firstParty[0].meters[0]) {
+                $perGbPrice = $cost.firstParty[0].meters[0].perUnitAmount
+            }
+
+            if ($cost.id -eq 'Sentinel_PerGB_undefined') {
+                $bmxPricing.Sentinel.PayAsYouGo = $perGbPrice
+            }
+            elseif ($cost.id -match '^Sentinel_CapacityReservation_(\d+)$') {
+                $tierGB = [int]$matches[1]
+                $dailyRate = $perGbPrice
+                $effectivePerGB = if ($tierGB -gt 0 -and $dailyRate) { [math]::Round($dailyRate / $tierGB, 4) } else { 0 }
+                $bmxPricing.Sentinel.CommitmentTiers[$tierGB] = @{
+                    DailyRate = $dailyRate
+                    EffectivePerGB = $effectivePerGB
+                }
+            }
+            elseif ($cost.id -eq 'Sentinel_LogDataRetention_undefined') {
+                $bmxPricing.Sentinel.DataRetention = $perGbPrice
+            }
+            elseif ($cost.id -eq 'LogAnalytics_PerGB_undefined') {
+                $bmxPricing.LogAnalytics.PayAsYouGo = $perGbPrice
+            }
+            elseif ($cost.id -match '^LogAnalytics_CapacityReservation_(\d+)$') {
+                $tierGB = [int]$matches[1]
+                $dailyRate = $perGbPrice
+                $effectivePerGB = if ($tierGB -gt 0 -and $dailyRate) { [math]::Round($dailyRate / $tierGB, 4) } else { 0 }
+                $bmxPricing.LogAnalytics.CommitmentTiers[$tierGB] = @{
+                    DailyRate = $dailyRate
+                    EffectivePerGB = $effectivePerGB
+                }
+            }
+        }
+
+        Write-Verbose "BMX API call successful - Channel: $($bmxPricing.Channel), PAYG: $($bmxPricing.Sentinel.PayAsYouGo)"
+        return $bmxPricing
+    }
+    catch {
+        Write-Verbose "BMX API call failed: $_"
         return $null
     }
 }
@@ -1436,11 +1931,23 @@ function Invoke-CostOptimizationAnalysis {
         PricingModel              = 'Unknown'
         TierComparison            = @()
         TopTablesAnalysis         = @()
-        BasicLogsCandidates       = @()
         AuxiliaryLogsCandidates   = @()
         DataLakeCandidates        = @()
         DedicatedClusterRecommendation = $null
         AnalysisNotes             = @()
+        # Pricing source fields (from BMX API integration)
+        PricingSource             = 'Retail'
+        Channel                   = $null
+        IsPartnerPricing          = $false
+        RetailComparison          = $null
+        BmxApiDisclaimer          = $null
+        # Currency conversion fields
+        ExchangeRate              = $null
+        OriginalCurrency          = $null
+        ConvertedCurrency         = $null
+        ConversionApplied         = $false
+        ExchangeRateDate          = $null
+        ExchangeRateSource        = $null
     }
 
     # Get pricing info
@@ -1448,6 +1955,43 @@ function Invoke-CostOptimizationAnalysis {
     if (-not $pricing -or -not $pricing.PayAsYouGo) {
         $result.AnalysisNotes += "Pricing data not available for analysis."
         return $result
+    }
+
+    # Store pricing source information from PricingInfo
+    if ($pricing.PricingSource) {
+        $result.PricingSource = $pricing.PricingSource
+        $result.Channel = $pricing.Channel
+        $result.IsPartnerPricing = $pricing.IsPartnerPricing
+        $result.RetailComparison = $pricing.RetailComparison
+        $result.BmxApiDisclaimer = $pricing.BmxApiDisclaimer
+
+        # Copy currency conversion fields
+        $result.ExchangeRate = $pricing.ExchangeRate
+        $result.OriginalCurrency = $pricing.OriginalCurrency
+        $result.ConvertedCurrency = $pricing.ConvertedCurrency
+        $result.ConversionApplied = $pricing.ConversionApplied
+        $result.ExchangeRateDate = $pricing.ExchangeRateDate
+        $result.ExchangeRateSource = $pricing.ExchangeRateSource
+
+        # Add pricing source to analysis notes
+        if ($pricing.PricingSource -eq 'BMX') {
+            $channelText = if ($pricing.Channel) { " (Channel: $($pricing.Channel))" } else { "" }
+            $result.AnalysisNotes += "Pricing retrieved from BMX Billing API (subscription-specific rates)$channelText."
+
+            if ($pricing.IsPartnerPricing -and $pricing.RetailComparison) {
+                $discountPct = $pricing.RetailComparison.DiscountPercent
+                if ($discountPct -gt 0) {
+                    $result.AnalysisNotes += "CSP/Partner discount: Approximately $discountPct% below public retail pricing."
+                }
+            }
+
+            # Add currency conversion note
+            if ($pricing.ConversionApplied -and $pricing.ExchangeRate) {
+                $result.AnalysisNotes += "Currency converted from USD to $($pricing.ConvertedCurrency) at rate $($pricing.ExchangeRate) ($($pricing.ExchangeRateSource), $($pricing.ExchangeRateDate))."
+            }
+
+            $result.AnalysisNotes += "Note: BMX API is undocumented - verify pricing in Azure Portal."
+        }
     }
 
     # Store pricing model
@@ -1711,45 +2255,6 @@ function Invoke-CostOptimizationAnalysis {
 
     $result.TierComparison = $tierComparison
 
-    # Identify Basic Logs candidates
-    $basicLogsCandidates = @()
-    $basicLogsEligibleTables = @(
-        'ContainerLogV2', 'AppTraces', 'AppDependencies', 'AppRequests',
-        'AzureDiagnostics', 'AzureMetrics', 'StorageBlobLogs', 'StorageFileLogs',
-        'StorageQueueLogs', 'StorageTableLogs', 'AWSCloudTrail', 'AWSVPCFlow',
-        'AWSGuardDuty', 'GCPAuditLogs', 'SecurityEvent', 'CommonSecurityLog', 'Syslog'
-    )
-
-    if ($CollectedData.TopTables) {
-        foreach ($table in $CollectedData.TopTables) {
-            $tableName = $table.DataType
-            $tableGB = [double]$table.TotalGB
-
-            $isFree = $script:FreeDataTables -contains $tableName
-            $isE5Covered = ($e5EligibleTables -contains $tableName) -and ($e5DailyGrantGB -gt 0)
-
-            if ($isFree -or $isE5Covered) { continue }
-
-            if ($basicLogsEligibleTables -contains $tableName -or $tableName -match '_CL$') {
-                $monthlyGB = $tableGB
-                $currentCost = $monthlyGB * $pricing.PayAsYouGo
-                $basicCost = $monthlyGB * $pricing.BasicLogsRate
-                $savings = $currentCost - $basicCost
-
-                if ($savings -gt 10) {
-                    $basicLogsCandidates += [PSCustomObject]@{
-                        TableName       = $tableName
-                        MonthlyGB       = [math]::Round($monthlyGB, 2)
-                        CurrentCost     = [math]::Round($currentCost, 2)
-                        BasicCost       = [math]::Round($basicCost, 2)
-                        PotentialSavings = [math]::Round($savings, 2)
-                    }
-                }
-            }
-        }
-    }
-    $result.BasicLogsCandidates = $basicLogsCandidates | Sort-Object PotentialSavings -Descending
-
     # Identify Auxiliary Logs candidates
     $auxiliaryLogsCandidates = @()
     $auxiliaryLogsEligibleTables = @(
@@ -1840,11 +2345,6 @@ function Invoke-CostOptimizationAnalysis {
 
     if ($e5DailyGrantGB -gt 0 -and $result.E5GrantUtilization -lt 50) {
         $result.AnalysisNotes += "E5 data grant is underutilized. Ensure E5-eligible data sources (Entra ID, M365) are connected."
-    }
-
-    if ($basicLogsCandidates.Count -gt 0) {
-        $totalBasicSavings = ($basicLogsCandidates | Measure-Object -Property PotentialSavings -Sum).Sum
-        $result.AnalysisNotes += "Converting $($basicLogsCandidates.Count) table(s) to Basic Logs could save approximately $($pricing.Currency) $([math]::Round($totalBasicSavings, 2))/month."
     }
 
     if ($auxiliaryLogsCandidates.Count -gt 0) {
@@ -3180,20 +3680,6 @@ function Invoke-AllHealthChecks {
             }
         }
 
-        # COST-004: Basic Logs Candidates
-        if ($costAnalysis.BasicLogsCandidates -and $costAnalysis.BasicLogsCandidates.Count -gt 0) {
-            $candidateCount = $costAnalysis.BasicLogsCandidates.Count
-            $totalSavings = ($costAnalysis.BasicLogsCandidates | Measure-Object -Property PotentialSavings -Sum).Sum
-            $checks += [PSCustomObject]@{
-                CheckId     = 'COST-004'
-                CheckName   = 'Basic Logs Candidates'
-                Category    = 'Cost Optimization'
-                Status      = 'Info'
-                Severity    = 'Info'
-                Description = "$(Format-Plural $candidateCount 'table') could be converted to Basic Logs for potential savings of approximately $currency $([math]::Round($totalSavings, 2))/month. Basic Logs have reduced query capabilities but lower ingestion costs."
-                Details     = $costAnalysis.BasicLogsCandidates | Select-Object TableName, MonthlyGB, CurrentCost, BasicCost, PotentialSavings
-            }
-        }
     }
 
     return ,$checks
@@ -5702,6 +6188,31 @@ function ConvertTo-ReportHtml {
             default { "<span class='badge bg-secondary'>Unknown</span>" }
         }
 
+        # Pricing source badge (BMX vs Retail)
+        $pricingSourceBadge = ""
+        $pricingSourceBanner = ""
+        if ($cost.PricingSource -eq 'BMX') {
+            $channelDisplay = if ($cost.IsPartnerPricing) { "CSP/Partner" } elseif ($cost.Channel) { $cost.Channel } else { "Subscription-Specific" }
+            $pricingSourceBadge = "<span class='badge bg-info d-block mt-1'><i data-lucide='building' style='width:12px;height:12px' class='me-1'></i>$channelDisplay Pricing</span>"
+
+            # Build discount banner if partner pricing with discount
+            if ($cost.IsPartnerPricing -and $cost.RetailComparison -and $cost.RetailComparison.DiscountPercent -gt 0) {
+                $discountPct = $cost.RetailComparison.DiscountPercent
+                $retailPayg = $cost.RetailComparison.PayAsYouGo
+                $pricingSourceBanner = @"
+<div class="alert alert-success d-flex align-items-center mb-4" role="alert">
+  <i data-lucide="badge-percent" class="me-3" style="width:24px;height:24px;flex-shrink:0;"></i>
+  <div>
+    <strong>CSP/Partner Pricing Applied</strong><br>
+    <small class="text-muted">This subscription has partner pricing with approximately <strong>$discountPct% discount</strong> vs retail rates (PAYG: $currency $($pricing.PayAsYouGo)/GB vs retail $currency $retailPayg/GB).</small>
+  </div>
+</div>
+"@
+            }
+        } else {
+            $pricingSourceBadge = "<span class='badge bg-secondary d-block mt-1'>Retail Pricing</span>"
+        }
+
         # Summary tiles (6 KPIs)
         $currentCostDisplay = "$currency $([math]::Round($cost.CurrentMonthlyCost, 2))"
         $optimalCostDisplay = "$currency $([math]::Round($cost.OptimalMonthlyCost, 2))"
@@ -5722,13 +6233,14 @@ function ConvertTo-ReportHtml {
         $e5ProgressClass = if ($cost.E5GrantUtilization -ge 80) { 'bg-success' } elseif ($cost.E5GrantUtilization -ge 50) { 'bg-info' } else { 'bg-warning' }
 
         $costManagementHtml = @"
+$pricingSourceBanner
 <!-- Cost Summary Header -->
 <div class="row mb-4">
   <div class="col-lg-4 mb-3 mb-lg-0">
     <div class="card border-0 shadow-sm h-100" style="background: linear-gradient(135deg, #1a365d 0%, #2d4a6f 100%);">
       <div class="card-body text-white p-4">
         <div class="d-flex justify-content-between align-items-start mb-3">
-          <span class="badge $(if ($cost.PricingModel -eq 'Simplified') { 'bg-success' } else { 'bg-warning text-dark' })">$($cost.PricingModel) Pricing</span>
+          <div><span class="badge $(if ($cost.PricingModel -eq 'Simplified') { 'bg-success' } else { 'bg-warning text-dark' })">$($cost.PricingModel) Pricing Tier</span>$pricingSourceBadge</div>
           <i data-lucide="receipt" style="width:24px;height:24px;opacity:0.7"></i>
         </div>
         <p class="text-uppercase small mb-1" style="opacity:0.8;letter-spacing:0.5px;">Estimated Monthly Cost</p>
@@ -6219,6 +6731,135 @@ document.addEventListener('DOMContentLoaded', function() {
 "@
         }
 
+        # Retention Costs Section
+        if ($collectedData.RetentionAnalysis -and $collectedData.RetentionAnalysis.TotalRetentionCost -gt 0) {
+            $retention = $collectedData.RetentionAnalysis
+
+            $costManagementHtml += @"
+<hr class="my-4">
+<div id="retention-costs" class="mb-4">
+<h5 class="fw-bold text-muted text-uppercase mb-3"><i data-lucide="clock" class="me-2" style="width:16px;height:16px"></i>Data Retention Costs</h5>
+<p class="text-muted small">Monthly storage costs for data retained beyond the free period (90 days for Sentinel tables, 31 days for standard Log Analytics tables).</p>
+"@
+
+            # Summary cards row (3 metrics)
+            $costManagementHtml += @"
+<div class="row g-3 mb-4">
+  <div class="col-md-4">
+    <div class="card border-0 bg-light h-100">
+      <div class="card-body text-center py-3">
+        <div class="text-muted small text-uppercase mb-1">Analytics Tier Retention</div>
+        <div class="fs-4 fw-bold text-primary">$currency $($retention.TotalAnalyticsRetentionCost)</div>
+        <div class="text-muted small">/month</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-4">
+    <div class="card border-0 bg-light h-100">
+      <div class="card-body text-center py-3">
+        <div class="text-muted small text-uppercase mb-1">Archive Tier Retention</div>
+        <div class="fs-4 fw-bold text-secondary">$currency $($retention.TotalDataLakeRetentionCost)</div>
+        <div class="text-muted small">/month</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-4">
+    <div class="card border-0 shadow-sm h-100">
+      <div class="card-body text-center py-3">
+        <div class="text-muted small text-uppercase mb-1">Total Retention Cost</div>
+        <div class="fs-4 fw-bold text-dark">$currency $($retention.TotalRetentionCost)</div>
+        <div class="text-muted small">/month</div>
+      </div>
+    </div>
+  </div>
+</div>
+"@
+
+            # Top tables by retention cost (if any)
+            if ($retention.TableRetentionCosts -and $retention.TableRetentionCosts.Count -gt 0) {
+                $topRetentionTables = $retention.TableRetentionCosts |
+                    Sort-Object TotalCost -Descending |
+                    Select-Object -First 10 |
+                    Where-Object { $_.TotalCost -gt 1 }
+
+                if ($topRetentionTables.Count -gt 0) {
+                    $costManagementHtml += @"
+<h6 class="mt-3 mb-2">Top Tables by Retention Cost</h6>
+<table class="table table-hover table-sm report-table" id="retentionCostTable">
+<thead>
+<tr>
+    <th>Table</th>
+    <th>Daily GB</th>
+    <th>Analytics Retention</th>
+    <th>Archive Days</th>
+    <th>Analytics Cost</th>
+    <th>Archive Cost</th>
+    <th>Total Cost</th>
+</tr>
+</thead>
+<tbody>
+"@
+                    foreach ($tbl in $topRetentionTables) {
+                        $analyticsRetentionDisplay = if ($tbl.AnalyticsRetentionDays -gt $tbl.FreePeriodDays) {
+                            "$($tbl.AnalyticsRetentionDays) days <span class='text-muted small'>($($tbl.AnalyticsRetentionDays - $tbl.FreePeriodDays) billable)</span>"
+                        } else {
+                            "$($tbl.AnalyticsRetentionDays) days"
+                        }
+                        $archiveDaysDisplay = if ($tbl.ArchiveRetentionDays -gt 0) { "$($tbl.ArchiveRetentionDays) days" } else { "-" }
+                        $analyticsCostDisplay = if ($tbl.AnalyticsCost -gt 0) { "$currency $($tbl.AnalyticsCost)" } else { "-" }
+                        $archiveCostDisplay = if ($tbl.ArchiveCost -gt 0) { "$currency $($tbl.ArchiveCost)" } else { "-" }
+
+                        $costManagementHtml += @"
+<tr>
+    <td><code>$($tbl.TableName)</code></td>
+    <td>$($tbl.DailyGB)</td>
+    <td>$analyticsRetentionDisplay</td>
+    <td>$archiveDaysDisplay</td>
+    <td>$analyticsCostDisplay</td>
+    <td>$archiveCostDisplay</td>
+    <td><strong>$currency $($tbl.TotalCost)</strong></td>
+</tr>
+"@
+                    }
+                    $costManagementHtml += "</tbody></table>"
+                }
+            }
+
+            # Optimization tips (if any)
+            if ($retention.RetentionOptimizationTips -and $retention.RetentionOptimizationTips.Count -gt 0) {
+                $totalPotentialSavings = ($retention.RetentionOptimizationTips | Measure-Object -Property PotentialSavings -Sum).Sum
+                $costManagementHtml += @"
+<h6 class="mt-4 mb-2">Retention Optimization Opportunities</h6>
+<p class="text-muted small">Potential savings by moving data to Archive tier: <strong class="text-success">$currency $([math]::Round($totalPotentialSavings, 2))/month</strong></p>
+<table class="table table-hover table-sm">
+<thead>
+<tr>
+    <th>Table</th>
+    <th>Current Cost</th>
+    <th>Optimized Cost</th>
+    <th>Potential Savings</th>
+    <th>Recommendation</th>
+</tr>
+</thead>
+<tbody>
+"@
+                foreach ($tip in $retention.RetentionOptimizationTips) {
+                    $costManagementHtml += @"
+<tr>
+    <td><code>$($tip.TableName)</code></td>
+    <td>$currency $($tip.CurrentCost)</td>
+    <td>$currency $($tip.OptimizedCost)</td>
+    <td><span class="text-success fw-bold">$currency $($tip.PotentialSavings)</span></td>
+    <td>$($tip.Recommendation)</td>
+</tr>
+"@
+                }
+                $costManagementHtml += "</tbody></table>"
+            }
+
+            $costManagementHtml += "</div>" # Close retention-costs div
+        }
+
         # Cost Optimization Recommendations Section
         $costManagementHtml += @"
 <hr class="my-4">
@@ -6256,38 +6897,6 @@ document.addEventListener('DOMContentLoaded', function() {
     <td>$currency $($tbl.RawMonthlyCost)</td>
     <td>$(if ($tbl.E5GrantAppliedCost -gt 0) { "<span class='text-success'>-$currency $($tbl.E5GrantAppliedCost)</span>" } else { "-" })</td>
     <td><strong>$currency $($tbl.EffectiveMonthlyCost)</strong></td>
-</tr>
-"@
-            }
-            $costManagementHtml += "</tbody></table>"
-        }
-
-        # Basic Logs Candidates
-        if ($cost.BasicLogsCandidates -and $cost.BasicLogsCandidates.Count -gt 0) {
-            $totalBasicSavings = ($cost.BasicLogsCandidates | Measure-Object -Property PotentialSavings -Sum).Sum
-            $costManagementHtml += @"
-<h6 class="mt-4 mb-2">Basic Logs Candidates</h6>
-<p class="text-muted small">These high-volume tables could be converted to Basic Logs to reduce costs. Basic Logs have a lower ingestion cost but limited query capabilities (8-day retention, no alerts, limited KQL functions). Potential combined savings: <strong>$currency $([math]::Round($totalBasicSavings, 2))/month</strong>.</p>
-<table class="table table-hover table-sm report-table" id="basicLogsCandidatesTable">
-<thead>
-<tr>
-    <th>Table Name</th>
-    <th>Monthly Volume (GB)</th>
-    <th>Current Cost</th>
-    <th>Basic Logs Cost</th>
-    <th>Potential Savings</th>
-</tr>
-</thead>
-<tbody>
-"@
-            foreach ($candidate in $cost.BasicLogsCandidates) {
-                $costManagementHtml += @"
-<tr>
-    <td><code>$($candidate.TableName)</code></td>
-    <td>$($candidate.MonthlyGB)</td>
-    <td>$currency $($candidate.CurrentCost)</td>
-    <td>$currency $($candidate.BasicCost)</td>
-    <td><span class="text-success fw-bold">$currency $($candidate.PotentialSavings)</span></td>
 </tr>
 "@
             }
@@ -7154,9 +7763,10 @@ document.addEventListener('DOMContentLoaded', function() {
 <li class='ms-3'><a class='nav-link py-1 small' href='#data-collection-health'>Collection Health</a></li>
 <li class='ms-3'><a class='nav-link py-1 small' href='#agent-health'>Agent Health</a></li>
 <li><a class='nav-link py-1' href='#cost-management'>Cost Management</a></li>
-<li class='ms-3'><a class='nav-link py-1 small' href='#pricing-tiers'>Pricing Tiers</a></li>
 <li class='ms-3'><a class='nav-link py-1 small' href='#ingestion-costs'>Ingestion Costs</a></li>
+<li class='ms-3'><a class='nav-link py-1 small' href='#pricing-tiers'>Pricing Tiers</a></li>
 <li class='ms-3'><a class='nav-link py-1 small' href='#e5-benefit'>E5 Data Grant</a></li>
+<li class='ms-3'><a class='nav-link py-1 small' href='#retention-costs'>Retention Costs</a></li>
 <li class='ms-3'><a class='nav-link py-1 small' href='#cost-optimization-recs'>Optimization</a></li>
 <li><a class='nav-link py-1' href='#content-management'>Content Management</a></li>
 <li class='ms-3'><a class='nav-link py-1 small' href='#content-hub'>Content Hub</a></li>
@@ -8360,14 +8970,34 @@ catch {
     Write-Host "    E5 license data unavailable: $_" -ForegroundColor Yellow
 }
 
-# Fetch Sentinel pricing from Azure Retail Prices API
+# Fetch Sentinel pricing (BMX API for CSP/Partner subscriptions, fallback to Retail API)
 Write-Host "    Fetching Sentinel pricing for region $wsLocation..." -ForegroundColor DarkGray
 try {
-    $pricingInfo = Get-SentinelPricingInfo -Region $wsLocation -Currency $billingCurrency
+    # Try BMX API first for subscription-specific pricing (CSP/Partner subscriptions get lower rates)
+    $pricingInfo = Get-SentinelPricingInfo -Region $wsLocation -Currency $billingCurrency `
+        -SubscriptionId $SubscriptionId -Context $context -TryBmxPricing
     if ($pricingInfo) {
         $collectedData.PricingInfo = $pricingInfo
         $tierCount = if ($pricingInfo.CommitmentTiers) { $pricingInfo.CommitmentTiers.Count } else { 0 }
-        Write-Host "    Retrieved pricing: PAYG $($billingCurrency) $($pricingInfo.PayAsYouGo)/GB + $(Format-Plural $tierCount 'commitment tier')" -ForegroundColor Green
+
+        # Display pricing source and details
+        if ($pricingInfo.PricingSource -eq 'BMX') {
+            $channelDisplay = if ($pricingInfo.Channel) { " ($($pricingInfo.Channel))" } else { "" }
+            $discountDisplay = ""
+            if ($pricingInfo.RetailComparison -and $pricingInfo.RetailComparison.DiscountPercent -gt 0) {
+                $discountDisplay = " (~$($pricingInfo.RetailComparison.DiscountPercent)% below retail)"
+            }
+            Write-Host "    Retrieved subscription-specific pricing (BMX API)$channelDisplay" -ForegroundColor Green
+            Write-Host "    PAYG: $($pricingInfo.Currency) $($pricingInfo.PayAsYouGo)/GB$discountDisplay + $(Format-Plural $tierCount 'commitment tier')" -ForegroundColor Green
+            if ($pricingInfo.IsPartnerPricing) {
+                Write-Host "    CSP/Partner pricing detected - rates may differ from public retail" -ForegroundColor Cyan
+            }
+            if ($pricingInfo.ConversionApplied -and $pricingInfo.ExchangeRate) {
+                Write-Host "    Converted from USD to $($pricingInfo.ConvertedCurrency) at rate $($pricingInfo.ExchangeRate)" -ForegroundColor Cyan
+            }
+        } else {
+            Write-Host "    Retrieved retail pricing: PAYG $($billingCurrency) $($pricingInfo.PayAsYouGo)/GB + $(Format-Plural $tierCount 'commitment tier')" -ForegroundColor Green
+        }
     } else {
         Write-Host "    Pricing data not available for region $wsLocation" -ForegroundColor Yellow
     }
