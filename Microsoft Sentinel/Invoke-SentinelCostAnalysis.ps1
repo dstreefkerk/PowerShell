@@ -831,6 +831,7 @@ function Get-E5LicenseCount {
         'SPE_E5',                    # Microsoft 365 E5
         'ENTERPRISEPREMIUM',         # Office 365 E5
         'M365_E5',                   # Microsoft 365 E5 (alternate)
+        'Microsoft_365_E5_(no_Teams)', # Microsoft 365 E5 without Teams (separate Teams licensing)
         'IDENTITY_THREAT_PROTECTION', # Microsoft 365 E5 Security
         'M365_E5_SUITE_COMPONENTS',  # Microsoft 365 E5 Suite features
         'SPE_E5_NOPSTNCONF',         # Microsoft 365 E5 without Audio Conferencing
@@ -857,14 +858,36 @@ function Get-E5LicenseCount {
         $uri = "https://graph.microsoft.com/v1.0/subscribedSkus"
         $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method Get -ErrorAction Stop
 
+        # Check if we got any SKUs at all - if empty, likely a permissions issue
+        $allSkus = $response.value
+        if (-not $allSkus -or $allSkus.Count -eq 0) {
+            Write-Verbose "Graph API returned no SKUs - this typically indicates insufficient permissions (Organization.Read.All required)"
+            return @{
+                TotalSeats       = 0
+                SkuDetails       = @()
+                PermissionIssue  = $true
+                TotalSkusFound   = 0
+            }
+        }
+
         $totalSeats = 0
         $skuDetails = @()
+        $allSkuDetails = @()
 
-        foreach ($sku in $response.value) {
+        foreach ($sku in $allSkus) {
             $skuPartNumber = $sku.skuPartNumber
-            if ($e5SkuPartNumbers -contains $skuPartNumber) {
-                $enabledUnits = $sku.prepaidUnits.enabled
-                $consumedUnits = $sku.consumedUnits
+            $enabledUnits = $sku.prepaidUnits.enabled
+            $consumedUnits = $sku.consumedUnits
+            $isE5Eligible = $e5SkuPartNumbers -contains $skuPartNumber
+
+            $allSkuDetails += [PSCustomObject]@{
+                SkuPartNumber = $skuPartNumber
+                EnabledUnits  = $enabledUnits
+                ConsumedUnits = $consumedUnits
+                IsE5Eligible  = $isE5Eligible
+            }
+
+            if ($isE5Eligible) {
                 $totalSeats += $enabledUnits
 
                 $skuDetails += [PSCustomObject]@{
@@ -877,18 +900,32 @@ function Get-E5LicenseCount {
         }
 
         return @{
-            TotalSeats = $totalSeats
-            SkuDetails = $skuDetails
+            TotalSeats         = $totalSeats
+            SkuDetails         = $skuDetails
+            PermissionIssue    = $false
+            TotalSkusFound     = $allSkus.Count
+            AllSkuDetails      = $allSkuDetails
         }
     }
     catch {
         $errorMsg = $_.Exception.Message
         if ($errorMsg -match '403|Forbidden|Authorization_RequestDenied|Insufficient privileges') {
             Write-Verbose "Graph API permission denied for subscribedSkus. Organization.Read.All permission required."
+            return @{
+                TotalSeats       = 0
+                SkuDetails       = @()
+                PermissionIssue  = $true
+                ErrorMessage     = "Organization.Read.All permission required"
+            }
         } else {
             Write-Verbose "Failed to retrieve E5 license information: $_"
+            return @{
+                TotalSeats       = 0
+                SkuDetails       = @()
+                PermissionIssue  = $true
+                ErrorMessage     = $errorMsg
+            }
         }
-        return $null
     }
 }
 
@@ -2458,7 +2495,16 @@ try {
         $e5Info = Get-E5LicenseCount -GraphToken $graphToken
         if ($e5Info) {
             $collectedData.E5LicenseInfo = $e5Info
-            if ($e5Info.TotalSeats -gt 0) {
+
+            # Check for permission issues first
+            if ($e5Info.PermissionIssue) {
+                if ($e5Info.ErrorMessage) {
+                    Write-ResultLine "E5/A5/F5/G5 Licenses" "Unable to query ($($e5Info.ErrorMessage))" -ValueColor Yellow
+                } else {
+                    Write-ResultLine "E5/A5/F5/G5 Licenses" "Unable to query (Organization.Read.All permission required)" -ValueColor Yellow
+                }
+                Write-Host "    Note: Grant Organization.Read.All in Azure AD to detect E5 license data grants." -ForegroundColor DarkGray
+            } elseif ($e5Info.TotalSeats -gt 0) {
                 Write-ResultLine "E5/A5/F5/G5 Licenses" (Format-Plural $e5Info.TotalSeats 'seat') -ValueColor Green
                 $e5DailyGrant = $e5Info.TotalSeats * 0.005
                 Write-ResultLine "Daily Data Grant" "$(Format-DataSize $e5DailyGrant)/day" -ValueColor Green
@@ -2471,10 +2517,28 @@ try {
                     }
                 }
             } else {
-                Write-ResultLine "E5/A5/F5/G5 Licenses" "None found" -ValueColor Yellow
+                # We got a response with SKUs but none matched E5/A5/F5/G5
+                Write-ResultLine "E5/A5/F5/G5 Licenses" "None found ($($e5Info.TotalSkusFound) SKUs checked)" -ValueColor Yellow
+                if ($e5Info.AllSkuDetails -and $e5Info.AllSkuDetails.Count -gt 0) {
+                    # Check if any E5-eligible SKUs exist but have 0 seats
+                    $e5SkusWithZeroSeats = $e5Info.AllSkuDetails | Where-Object { $_.IsE5Eligible -and $_.EnabledUnits -eq 0 }
+                    if ($e5SkusWithZeroSeats) {
+                        Write-Host ""
+                        Write-Host "  E5-eligible SKUs found but with 0 enabled seats:" -ForegroundColor Yellow
+                        foreach ($sku in $e5SkusWithZeroSeats) {
+                            Write-Host "    - $($sku.SkuPartNumber): $($sku.EnabledUnits) enabled, $($sku.ConsumedUnits) consumed" -ForegroundColor Yellow
+                        }
+                    }
+                    Write-Host ""
+                    Write-Host "  Tenant SKUs:" -ForegroundColor DarkGray
+                    foreach ($sku in ($e5Info.AllSkuDetails | Sort-Object SkuPartNumber)) {
+                        $marker = if ($sku.IsE5Eligible) { " [E5-ELIGIBLE]" } else { "" }
+                        Write-Host "    - $($sku.SkuPartNumber): $($sku.EnabledUnits) enabled$marker" -ForegroundColor $(if ($sku.IsE5Eligible) { 'Yellow' } else { 'DarkGray' })
+                    }
+                }
             }
         } else {
-            Write-ResultLine "E5 License Query" "Permission denied (Organization.Read.All required)" -ValueColor Yellow
+            Write-ResultLine "E5 License Query" "Failed to query Graph API" -ValueColor Yellow
         }
     } else {
         Write-ResultLine "Graph Token" "Failed to obtain" -ValueColor Yellow
@@ -3166,14 +3230,14 @@ Write-SectionHeader "Summary" -Color Green
 Write-Host ""
 Write-Host "  Authentication:" -ForegroundColor White
 Write-Host "    - ARM API:         OK" -ForegroundColor Green
-Write-Host "    - Graph API:       $(if ($collectedData.E5LicenseInfo) { 'OK' } else { 'Limited' })" -ForegroundColor $(if ($collectedData.E5LicenseInfo) { 'Green' } else { 'Yellow' })
+Write-Host "    - Graph API:       $(if ($collectedData.E5LicenseInfo -and -not $collectedData.E5LicenseInfo.PermissionIssue) { 'OK' } elseif ($collectedData.E5LicenseInfo -and $collectedData.E5LicenseInfo.PermissionIssue) { 'Limited (need Organization.Read.All)' } else { 'Failed' })" -ForegroundColor $(if ($collectedData.E5LicenseInfo -and -not $collectedData.E5LicenseInfo.PermissionIssue) { 'Green' } else { 'Yellow' })
 Write-Host "    - Log Analytics:   $(if ($collectedData.IngestionTrend -and -not $SkipKqlQueries) { 'OK' } elseif ($SkipKqlQueries) { 'Skipped' } else { 'Failed' })" -ForegroundColor $(if ($collectedData.IngestionTrend -and -not $SkipKqlQueries) { 'Green' } elseif ($SkipKqlQueries) { 'Yellow' } else { 'Red' })
 Write-Host ""
 Write-Host "  Data Collection:" -ForegroundColor White
 Write-Host "    - Workspace Config: OK" -ForegroundColor Green
 Write-Host "    - Pricing Model:    $(if ($collectedData.SentinelPricingModel -and $collectedData.SentinelPricingModel.PricingModel -ne 'Unknown') { $collectedData.SentinelPricingModel.PricingModel } else { 'Unknown' })" -ForegroundColor $(if ($collectedData.SentinelPricingModel -and $collectedData.SentinelPricingModel.PricingModel -eq 'Simplified') { 'Green' } elseif ($collectedData.SentinelPricingModel -and $collectedData.SentinelPricingModel.PricingModel -eq 'Classic') { 'Yellow' } else { 'Red' })
 Write-Host "    - Retail Prices:    $(if ($collectedData.PricingInfo) { 'OK' } else { 'Failed' })" -ForegroundColor $(if ($collectedData.PricingInfo) { 'Green' } else { 'Red' })
-Write-Host "    - E5 Licenses:      $(if ($collectedData.E5LicenseInfo) { if ($collectedData.E5LicenseInfo.TotalSeats -gt 0) { "$($collectedData.E5LicenseInfo.TotalSeats) seats" } else { 'None found' } } else { 'Not available' })" -ForegroundColor $(if ($collectedData.E5LicenseInfo -and $collectedData.E5LicenseInfo.TotalSeats -gt 0) { 'Green' } else { 'Yellow' })
+Write-Host "    - E5 Licenses:      $(if ($collectedData.E5LicenseInfo) { if ($collectedData.E5LicenseInfo.PermissionIssue) { 'Unable to query (permissions)' } elseif ($collectedData.E5LicenseInfo.TotalSeats -gt 0) { "$($collectedData.E5LicenseInfo.TotalSeats) seats" } else { "None found ($($collectedData.E5LicenseInfo.TotalSkusFound) SKUs checked)" } } else { 'Not available' })" -ForegroundColor $(if ($collectedData.E5LicenseInfo -and -not $collectedData.E5LicenseInfo.PermissionIssue -and $collectedData.E5LicenseInfo.TotalSeats -gt 0) { 'Green' } else { 'Yellow' })
 Write-Host "    - Defender P2:      $(if ($collectedData.DefenderServersP2) { if ($collectedData.DefenderServersP2.Enabled) { "Enabled ($($collectedData.DefenderServersP2.ProtectedVMCount) VMs via $($collectedData.DefenderServersP2.VMCountMethod))" } else { 'Not enabled' } } else { 'Not checked' })" -ForegroundColor $(if ($collectedData.DefenderServersP2 -and $collectedData.DefenderServersP2.Enabled) { 'Green' } else { 'Yellow' })
 Write-Host "    - Ingestion Data:   $(if ($collectedData.IngestionTrend) { "$($collectedData.IngestionTrend.Count) days" } else { 'Not available' })" -ForegroundColor $(if ($collectedData.IngestionTrend) { 'Green' } else { 'Yellow' })
 Write-Host "    - E5 Daily Data:    $(if ($collectedData.E5DailyIngestion) { "$($collectedData.E5DailyIngestion.Count) days (accurate overage)" } else { 'Using averages' })" -ForegroundColor $(if ($collectedData.E5DailyIngestion) { 'Green' } else { 'Yellow' })
