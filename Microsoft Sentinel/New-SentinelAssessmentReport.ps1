@@ -6894,9 +6894,9 @@ document.addEventListener('DOMContentLoaded', function() {
     <td>$($tbl.MonthlyGB)</td>
     <td>$freeIcon</td>
     <td>$e5Icon</td>
-    <td>$currency $($tbl.RawMonthlyCost)</td>
-    <td>$(if ($tbl.E5GrantAppliedCost -gt 0) { "<span class='text-success'>-$currency $($tbl.E5GrantAppliedCost)</span>" } else { "-" })</td>
-    <td><strong>$currency $($tbl.EffectiveMonthlyCost)</strong></td>
+    <td data-order="$($tbl.RawMonthlyCost)">$currency $($tbl.RawMonthlyCost)</td>
+    <td data-order="$($tbl.E5GrantAppliedCost)">$(if ($tbl.E5GrantAppliedCost -gt 0) { "<span class='text-success'>-$currency $($tbl.E5GrantAppliedCost)</span>" } else { "-" })</td>
+    <td data-order="$($tbl.EffectiveMonthlyCost)"><strong>$currency $($tbl.EffectiveMonthlyCost)</strong></td>
 </tr>
 "@
             }
@@ -8605,6 +8605,11 @@ $datasetsJsStr
         if (tableId === 'agentErrorsTable') {
           options.pageLength = 10;
           options.order = [[1, 'desc']];  // Sort by Failures desc
+        }
+
+        // Sort topTablesCostTable by Effective Cost (column 6) descending
+        if (tableId === 'topTablesCostTable') {
+          options.order = [[6, 'desc']];
         }
 
         // Workbooks table
