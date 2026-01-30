@@ -8554,7 +8554,17 @@ $datasetsJsStr
             }
           ],
           language: { search: "Filter:" },
-          pageLength: 25
+          pageLength: 25,
+          drawCallback: function() {
+            var api = this.api();
+            var pageInfo = api.page.info();
+            var wrapper = `$(api.table().container());
+            if (pageInfo.pages <= 1) {
+              wrapper.find('.dataTables_paginate').hide();
+            } else {
+              wrapper.find('.dataTables_paginate').show();
+            }
+          }
         };
 
         // Sort topTablesTable by Volume (column 1) descending by default
