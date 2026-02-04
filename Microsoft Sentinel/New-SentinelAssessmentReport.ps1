@@ -5457,6 +5457,23 @@ function ConvertTo-ReportHtml {
         $customRulesHtml += "</tbody></table>"
     }
 
+    # Helper function to generate sparkline container for jQuery Sparklines
+    function Get-SparklineContainer {
+        param([array]$Values)
+
+        if (-not $Values -or $Values.Count -eq 0) {
+            return '<span class="text-muted">-</span>'
+        }
+
+        $max = ($Values | Measure-Object -Maximum).Maximum
+        if ($max -eq 0) {
+            return '<span class="text-muted">-</span>'
+        }
+
+        $valuesJson = ($Values -join ',')
+        return "<span class=`"sparkline-data`" data-values=`"$valuesJson`"></span>"
+    }
+
     # Build Incident Volume by Rule table (from KQL query data)
     $incidentVolumeHtml = ""
     if ($Data.IncidentVolumeByRule -and @($Data.IncidentVolumeByRule).Count -gt 0) {
@@ -5466,7 +5483,7 @@ function ConvertTo-ReportHtml {
 <h5 class="mt-4 mb-3" id="incident-volume"><span class="badge bg-warning text-dark me-2">$($incidentVolumeRules.Count)</span> Incident Volume by Rule (30 Days)</h5>
 <p class="text-muted small">Rules generating the most incidents over the last 30 days. High-volume rules may indicate tuning opportunities for false positive reduction.</p>
 <table class="table table-hover table-sm report-table" id="incidentVolumeTable">
-<thead><tr><th>Rule Name</th><th>Status</th><th>Severity</th><th>Incidents (30d)</th><th>Daily Avg</th><th>Weekly Avg</th></tr></thead>
+<thead><tr><th>Rule Name</th><th>Status</th><th>Severity</th><th>Trend (30d)</th><th>Incidents (30d)</th><th>Daily Avg</th><th>Weekly Avg</th></tr></thead>
 <tbody>
 "@
         foreach ($rule in ($incidentVolumeRules | Sort-Object { -[double]$_.DailyAverage })) {
@@ -5484,7 +5501,16 @@ function ConvertTo-ReportHtml {
                 'Informational' { '<span class="badge bg-secondary">Info</span>' }
                 default         { '<span class="badge bg-secondary">-</span>' }
             }
-            $incidentVolumeHtml += "<tr><td>$ruleName</td><td>$statusBadge</td><td>$sevBadge</td><td>$($rule.IncidentCount)</td><td>$($rule.DailyAverage)</td><td>$($rule.WeeklyAverage)</td></tr>"
+            $dailyCounts = if ($rule.DailyCounts) {
+                # DailyCounts comes as JSON string from KQL make-series, parse it to array
+                if ($rule.DailyCounts -is [string]) {
+                    @($rule.DailyCounts | ConvertFrom-Json)
+                } else {
+                    @($rule.DailyCounts)
+                }
+            } else { @() }
+            $sparkline = Get-SparklineContainer -Values $dailyCounts
+            $incidentVolumeHtml += "<tr><td>$ruleName</td><td>$statusBadge</td><td>$sevBadge</td><td>$sparkline</td><td>$($rule.IncidentCount)</td><td>$($rule.DailyAverage)</td><td>$($rule.WeeklyAverage)</td></tr>"
         }
         $incidentVolumeHtml += "</tbody></table>"
     }
@@ -8161,6 +8187,10 @@ document.addEventListener('DOMContentLoaded', function() {
     .flyout-enabled .col-flyout-icon { width: 32px; text-align: center; }
     .flyout-detail-table { font-size: 0.85rem; }
     .flyout-detail-table th { background-color: #f8fafc; font-size: 0.75rem; text-transform: uppercase; color: #64748b; }
+    /* jQuery Sparklines */
+    .sparkline-data { display: inline-block; min-width: 100px; vertical-align: middle; }
+    .sparkline-data canvas { vertical-align: middle !important; }
+    .jqstooltip { background-color: rgba(15, 23, 42, 0.95) !important; border: none !important; border-radius: 4px !important; }
     @media print {
       .toc-container, .dt-buttons, .dataTables_filter, .dataTables_paginate { display: none !important; }
       .card { break-inside: avoid; }
@@ -8358,6 +8388,7 @@ document.addEventListener('DOMContentLoaded', function() {
   <script src="https://cdn.datatables.net/buttons/2.4.2/js/buttons.html5.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jquery-sparkline@2.4.0/jquery.sparkline.min.js"></script>
 
   <script>
     lucide.createIcons();
@@ -8859,6 +8890,17 @@ $datasetsJsStr
 
     // Initialize DataTables
     `$(document).ready(function() {
+      // Calculate sparkline global max BEFORE DataTables hides paginated rows
+      var sparklineGlobalMax = 0;
+      `$('.sparkline-data').each(function() {
+        var values = `$(this).data('values');
+        if (values) {
+          var valuesArray = String(values).split(',').map(Number);
+          var localMax = Math.max.apply(null, valuesArray);
+          if (localMax > sparklineGlobalMax) sparklineGlobalMax = localMax;
+        }
+      });
+
       `$('.report-table').each(function() {
         var sectionTitle = `$(this).closest('.card').find('.card-header').text().trim() || 'Export';
         var fileName = sectionTitle.replace(/\s+/g, '_');
@@ -8891,6 +8933,10 @@ $datasetsJsStr
             } else {
               wrapper.find('.dataTables_paginate').show();
             }
+            // Re-init sparklines after redraw
+            if (typeof initSparklines === 'function') {
+              initSparklines(this);
+            }
           }
         };
 
@@ -8899,9 +8945,25 @@ $datasetsJsStr
           options.order = [[1, 'desc']];
         }
 
-        // Sort incident volume table by Daily Avg (column 4) descending
+        // Sort incident volume table by Daily Avg (column 5) descending, Trend column (3) non-sortable
         if (tableId === 'incidentVolumeTable') {
-          options.order = [[4, 'desc']];
+          options.order = [[5, 'desc']];
+          options.columnDefs = [{ targets: 3, orderable: false, searchable: false }];
+          options.buttons = [
+            {
+              extend: 'copy',
+              text: '<i data-lucide="copy" class="me-1" style="width:14px;height:14px"></i> Copy',
+              className: 'btn',
+              exportOptions: { columns: ':not(:eq(3))' }
+            },
+            {
+              extend: 'excel',
+              text: '<i data-lucide="file-spreadsheet" class="me-1" style="width:14px;height:14px"></i> Excel',
+              className: 'btn',
+              filename: '${ClientName}_' + fileName,
+              exportOptions: { columns: ':not(:eq(3))' }
+            }
+          ];
         }
 
         // Sort visibility gaps table by Alerts 90d (column 4) descending
@@ -8953,6 +9015,48 @@ $datasetsJsStr
         `$(this).on('draw.dt', function() { lucide.createIcons(); });
         lucide.createIcons();
       });
+
+      // Initialize jQuery sparklines with consistent scaling (uses sparklineGlobalMax calculated above)
+      function initSparklines(container) {
+        // Handle DataTable API object passed from drawCallback
+        var `$container;
+        if (container && container.api) {
+          `$container = `$(container.api().table().container());
+        } else {
+          `$container = `$(container || document);
+        }
+
+        var `$sparklines = `$container.find('.sparkline-data:not(:has(canvas))');
+        if (`$sparklines.length === 0) return;
+
+        // Render all sparklines with consistent scale using pre-calculated global max
+        `$sparklines.each(function() {
+          var `$el = `$(this);
+          var values = `$el.data('values');
+          if (values) {
+            var valuesArray = String(values).split(',').map(Number);
+            `$el.sparkline(valuesArray, {
+              type: 'bar',
+              barColor: '#3b82f6',
+              zeroColor: '#e2e8f0',
+              barWidth: 4,
+              barSpacing: 1,
+              height: '20px',
+              chartRangeMin: 0,
+              chartRangeMax: sparklineGlobalMax || Math.max.apply(null, valuesArray),
+              tooltipFormat: '<span style="color:#fff">Day {{offset}}: {{value}}</span>',
+              tooltipValueLookups: {
+                'offset': (function() {
+                  var lookup = {};
+                  for (var i = 0; i < 30; i++) lookup[i] = (30 - i);
+                  return lookup;
+                })()
+              }
+            });
+          }
+        });
+      }
+      initSparklines();
 
       // Generic flyout handler - auto-discovers all flyout-enabled tables
       (function() {
@@ -9722,13 +9826,14 @@ SecurityIncident
 | where isnotempty(RelatedAnalyticRuleIds)
 | mv-expand RelatedAnalyticRuleIds to typeof(string)
 | where isnotempty(RelatedAnalyticRuleIds)
-| summarize IncidentCount = dcount(IncidentNumber) by RelatedAnalyticRuleIds
+| make-series DailyCounts = dcount(IncidentNumber) default=0 on TimeGenerated from LookbackPeriod to now() step 1d by RelatedAnalyticRuleIds
+| extend IncidentCount = toint(array_sum(DailyCounts))
 | extend DailyAverage = round(todouble(IncidentCount) / todouble(LookbackDays), 2)
 | extend WeeklyAverage = round(DailyAverage * 7, 2)
 | join kind=inner rules on RelatedAnalyticRuleIds
 | join kind=leftouter RuleAuditStatus on RuleName
 | extend RuleStatus = coalesce(RuleStatus, "Active")
-| project RuleName, RuleStatus, IncidentCount, DailyAverage, WeeklyAverage, Severity = AlertSeverity
+| project RuleName, RuleStatus, IncidentCount, DailyAverage, WeeklyAverage, Severity = AlertSeverity, DailyCounts
 | order by DailyAverage desc
 "@
             $collectedData.IncidentVolumeByRule = Invoke-SentinelKqlQuery -WorkspaceId $workspaceId -Query $incidentVolumeQuery
