@@ -470,6 +470,271 @@ function Get-GraphAccessToken {
 
 #endregion Authentication Functions
 
+#region Cost Management API Functions
+
+function Get-ActualSentinelCosts {
+    <#
+    .SYNOPSIS
+    Retrieves actual Sentinel costs from Azure Cost Management API.
+
+    .DESCRIPTION
+    Queries the Azure Cost Management API to get actual billed costs for Microsoft Sentinel.
+    This can be used to validate whether estimated costs (from BMX or retail pricing) match
+    actual billing, helping identify cases where BMX returns incorrect partner pricing.
+
+    .PARAMETER SubscriptionId
+    The Azure subscription ID to query costs for.
+
+    .PARAMETER AuthHeader
+    Hashtable containing the Authorization header with Bearer token.
+
+    .PARAMETER DaysBack
+    Number of days of cost history to retrieve. Defaults to 30.
+
+    .NOTES
+    Required permissions:
+    - Microsoft.CostManagement/query/action
+    - Typically included in Reader role or Cost Management Reader role
+
+    API Documentation:
+    https://learn.microsoft.com/en-us/rest/api/cost-management/query/usage
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SubscriptionId,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$AuthHeader,
+
+        [Parameter(Mandatory = $false)]
+        [int]$DaysBack = 30
+    )
+
+    try {
+        $endDate = (Get-Date).ToString('yyyy-MM-dd')
+        $startDate = (Get-Date).AddDays(-$DaysBack).ToString('yyyy-MM-dd')
+
+        $uri = "https://management.azure.com/subscriptions/$SubscriptionId/providers/Microsoft.CostManagement/query?api-version=2023-11-01"
+
+        $body = @{
+            type = "ActualCost"
+            timeframe = "Custom"
+            timePeriod = @{
+                from = $startDate
+                to = $endDate
+            }
+            dataset = @{
+                granularity = "None"
+                aggregation = @{
+                    totalCost = @{
+                        name = "Cost"
+                        function = "Sum"
+                    }
+                }
+                grouping = @(
+                    @{
+                        type = "Dimension"
+                        name = "ServiceName"
+                    }
+                    @{
+                        type = "Dimension"
+                        name = "MeterCategory"
+                    }
+                )
+                filter = @{
+                    or = @(
+                        @{
+                            dimensions = @{
+                                name = "ServiceName"
+                                operator = "In"
+                                values = @("Sentinel", "Azure Sentinel", "Microsoft Sentinel")
+                            }
+                        }
+                        @{
+                            dimensions = @{
+                                name = "MeterCategory"
+                                operator = "In"
+                                values = @("Sentinel", "Azure Sentinel", "Microsoft Sentinel")
+                            }
+                        }
+                    )
+                }
+            }
+        }
+
+        Write-Verbose "Querying Cost Management API for Sentinel costs ($startDate to $endDate)..."
+        # Use retry function with longer initial delay for Cost Management API (rate limited)
+        $response = Invoke-RestMethodWithRetry -Uri $uri -Method 'POST' -Headers $AuthHeader -Body $body -MaxRetries 3 -InitialDelaySeconds 5
+
+        # Parse response structure
+        # Response.properties.columns contains column definitions
+        # Response.properties.rows contains data: [[cost, currency, serviceName, meterCategory], ...]
+        $columns = $response.properties.columns
+        $rows = $response.properties.rows
+
+        # Find column indices
+        $costIndex = -1
+        $currencyIndex = -1
+        $serviceNameIndex = -1
+        $meterCategoryIndex = -1
+
+        for ($i = 0; $i -lt $columns.Count; $i++) {
+            switch ($columns[$i].name) {
+                "Cost" { $costIndex = $i }
+                "Currency" { $currencyIndex = $i }
+                "ServiceName" { $serviceNameIndex = $i }
+                "MeterCategory" { $meterCategoryIndex = $i }
+            }
+        }
+
+        # Calculate total cost
+        $totalCost = 0
+        $currency = "USD"
+        $costBreakdown = @()
+
+        if ($rows -and $rows.Count -gt 0) {
+            foreach ($row in $rows) {
+                $cost = if ($costIndex -ge 0) { [double]$row[$costIndex] } else { 0 }
+                $totalCost += $cost
+
+                if ($currencyIndex -ge 0 -and $row[$currencyIndex]) {
+                    $currency = $row[$currencyIndex]
+                }
+
+                $costBreakdown += [PSCustomObject]@{
+                    Cost = $cost
+                    ServiceName = if ($serviceNameIndex -ge 0) { $row[$serviceNameIndex] } else { "Unknown" }
+                    MeterCategory = if ($meterCategoryIndex -ge 0) { $row[$meterCategoryIndex] } else { "Unknown" }
+                }
+            }
+        }
+
+        # Calculate daily average and monthly projection
+        $dailyAverage = if ($DaysBack -gt 0) { [math]::Round($totalCost / $DaysBack, 2) } else { 0 }
+        $monthlyProjection = [math]::Round($dailyAverage * 30, 2)
+
+        Write-Verbose "Cost Management API returned: Total=$totalCost $currency over $DaysBack days"
+
+        return @{
+            Success = $true
+            TotalCost = [math]::Round($totalCost, 2)
+            DailyAverage = $dailyAverage
+            MonthlyProjection = $monthlyProjection
+            Currency = $currency
+            DateRange = @{ Start = $startDate; End = $endDate }
+            DaysQueried = $DaysBack
+            CostBreakdown = $costBreakdown
+            RawResponse = $response
+        }
+    }
+    catch {
+        $errorMessage = $_.Exception.Message
+
+        # Check for common permission errors
+        if ($errorMessage -match "AuthorizationFailed|Forbidden|does not have authorization") {
+            Write-Verbose "Cost Management API permission denied - user may need Cost Management Reader role"
+            return @{
+                Success = $false
+                Error = "Permission denied - requires Cost Management Reader role or Microsoft.CostManagement/query/action permission"
+                ErrorDetails = $errorMessage
+            }
+        }
+
+        Write-Verbose "Cost Management API failed: $errorMessage"
+        return @{
+            Success = $false
+            Error = $errorMessage
+        }
+    }
+}
+
+function Compare-EstimatedVsActualCosts {
+    <#
+    .SYNOPSIS
+    Compares estimated costs (from pricing APIs) against actual billed costs.
+
+    .DESCRIPTION
+    Determines whether the estimated costs from BMX/retail pricing match actual billing.
+    Returns a comparison result with variance analysis and recommendations.
+
+    .PARAMETER EstimatedMonthlyCost
+    The estimated monthly cost from pricing calculations.
+
+    .PARAMETER ActualCostData
+    The result from Get-ActualSentinelCosts.
+
+    .PARAMETER TolerancePercent
+    The acceptable variance percentage before flagging a mismatch. Defaults to 15%.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [double]$EstimatedMonthlyCost,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$ActualCostData,
+
+        [Parameter(Mandatory = $false)]
+        [double]$TolerancePercent = 15
+    )
+
+    if (-not $ActualCostData.Success) {
+        return @{
+            ComparisonAvailable = $false
+            Reason = $ActualCostData.Error
+        }
+    }
+
+    $actualMonthly = $ActualCostData.MonthlyProjection
+
+    # Calculate variance
+    $variance = $actualMonthly - $EstimatedMonthlyCost
+    $variancePercent = if ($EstimatedMonthlyCost -gt 0) {
+        [math]::Round(($variance / $EstimatedMonthlyCost) * 100, 1)
+    } else {
+        0
+    }
+
+    $varianceAbsolute = [math]::Abs($variancePercent)
+    $isWithinTolerance = $varianceAbsolute -le $TolerancePercent
+
+    # Determine if estimate is higher or lower than actual
+    $estimateAccuracy = if ($isWithinTolerance) {
+        "Accurate"
+    } elseif ($variance -gt 0) {
+        "Underestimated"  # Actual is higher than estimate
+    } else {
+        "Overestimated"   # Actual is lower than estimate
+    }
+
+    # Generate recommendation
+    $recommendation = if ($isWithinTolerance) {
+        "Pricing estimate is within $TolerancePercent% of actual costs - estimate appears accurate."
+    } elseif ($variance -gt 0) {
+        "Actual costs are $varianceAbsolute% higher than estimated. BMX/partner pricing may not reflect actual billing rates. Consider using retail pricing for more accurate estimates."
+    } else {
+        "Actual costs are $varianceAbsolute% lower than estimated. Actual billing may include discounts not reflected in pricing APIs."
+    }
+
+    return @{
+        ComparisonAvailable = $true
+        EstimatedMonthlyCost = $EstimatedMonthlyCost
+        ActualMonthlyProjection = $actualMonthly
+        ActualTotalCost = $ActualCostData.TotalCost
+        ActualDaysQueried = $ActualCostData.DaysQueried
+        Currency = $ActualCostData.Currency
+        Variance = [math]::Round($variance, 2)
+        VariancePercent = $variancePercent
+        IsWithinTolerance = $isWithinTolerance
+        TolerancePercent = $TolerancePercent
+        EstimateAccuracy = $estimateAccuracy
+        Recommendation = $recommendation
+    }
+}
+
+#endregion Cost Management API Functions
+
 #region Defender for Servers P2 Functions
 
 function Get-DefenderServersP2Benefit {
@@ -2334,6 +2599,7 @@ $collectedData = @{
     RetentionAnalysis    = $null  # Retention cost analysis
     Tables               = @()
     CostAnalysis         = $null
+    ActualCostValidation = $null  # Actual costs from Cost Management API for validation
 }
 
 #-----------------------------------------------------------------------------
@@ -3223,6 +3489,87 @@ if ($collectedData.PricingInfo -and $collectedData.IngestionTrend) {
 }
 
 #-----------------------------------------------------------------------------
+# Step 8: Actual Cost Validation (Cost Management API)
+#-----------------------------------------------------------------------------
+Write-SectionHeader "Step 8: Actual Cost Validation"
+
+Write-Host "  Querying Azure Cost Management API for actual Sentinel costs..." -ForegroundColor DarkGray
+
+try {
+    $actualCosts = Get-ActualSentinelCosts -SubscriptionId $SubscriptionId -AuthHeader $authHeader -DaysBack 30
+
+    if ($actualCosts.Success) {
+        $collectedData.ActualCostValidation = $actualCosts
+
+        Write-ResultLine "Cost Data Retrieved" "Yes" -ValueColor Green
+        Write-ResultLine "Period" "$($actualCosts.DateRange.Start) to $($actualCosts.DateRange.End) ($($actualCosts.DaysQueried) days)" -ValueColor Cyan
+        Write-ResultLine "Total Actual Cost" "$($actualCosts.Currency) $($actualCosts.TotalCost)" -ValueColor Cyan
+        Write-ResultLine "Daily Average" "$($actualCosts.Currency) $($actualCosts.DailyAverage)/day" -ValueColor Cyan
+        Write-ResultLine "Monthly Projection" "$($actualCosts.Currency) $($actualCosts.MonthlyProjection)/month" -ValueColor Yellow
+
+        # Compare with estimated cost if we have cost analysis data
+        if ($collectedData.CostAnalysis -and $collectedData.CostAnalysis.CurrentMonthlyCost) {
+            $comparison = Compare-EstimatedVsActualCosts `
+                -EstimatedMonthlyCost $collectedData.CostAnalysis.CurrentMonthlyCost `
+                -ActualCostData $actualCosts
+
+            if ($comparison.ComparisonAvailable) {
+                Write-Host ""
+                Write-Host "  ESTIMATE VS ACTUAL COMPARISON" -ForegroundColor White
+
+                $currency = $comparison.Currency
+                Write-ResultLine "Estimated Cost" "$currency $($comparison.EstimatedMonthlyCost)/month" -ValueColor Cyan
+                Write-ResultLine "Historical Cost Projection" "$currency $($comparison.ActualMonthlyProjection)/month" -ValueColor Cyan
+
+                $varianceColor = if ($comparison.IsWithinTolerance) { 'Green' } else { 'Yellow' }
+                $varianceSign = if ($comparison.Variance -ge 0) { '+' } else { '' }
+                Write-ResultLine "Variance" "$varianceSign$currency $($comparison.Variance) ($($comparison.VariancePercent)%)" -ValueColor $varianceColor
+
+                Write-ResultLine "Estimate Accuracy" $comparison.EstimateAccuracy -ValueColor $(
+                    switch ($comparison.EstimateAccuracy) {
+                        'Accurate' { 'Green' }
+                        'Underestimated' { 'Yellow' }
+                        'Overestimated' { 'Cyan' }
+                        default { 'White' }
+                    }
+                )
+
+                # Show warning if estimate doesn't match actual
+                if (-not $comparison.IsWithinTolerance) {
+                    Write-Host ""
+                    if ($comparison.VariancePercent -gt 0) {
+                        # Actual is higher than estimate
+                        Write-Host "  WARNING: Actual costs are significantly higher than estimated." -ForegroundColor Yellow
+                        Write-Host "  This may indicate that pricing API rates don't reflect actual billing." -ForegroundColor Yellow
+                        Write-Host "  Verify pricing in Azure Portal Cost Analysis." -ForegroundColor Yellow
+                    } else {
+                        # Actual is lower than estimate
+                        Write-Host "  NOTE: Actual costs are lower than estimated." -ForegroundColor Cyan
+                        Write-Host "  Billing may include discounts not reflected in pricing APIs." -ForegroundColor Cyan
+                    }
+                }
+
+                # Store comparison in collected data
+                $collectedData.ActualCostValidation.Comparison = $comparison
+            }
+        }
+    } else {
+        Write-ResultLine "Cost Data" "Not available" -ValueColor Yellow
+        Write-Host "    Reason: $($actualCosts.Error)" -ForegroundColor DarkGray
+
+        if ($actualCosts.Error -match "Permission denied|Cost Management Reader") {
+            Write-Host ""
+            Write-Host "    To enable cost validation, grant one of these permissions:" -ForegroundColor DarkGray
+            Write-Host "    - Cost Management Reader role on the subscription" -ForegroundColor DarkGray
+            Write-Host "    - Microsoft.CostManagement/query/action permission" -ForegroundColor DarkGray
+        }
+    }
+}
+catch {
+    Write-ResultLine "Cost Validation" "Failed: $_" -ValueColor Yellow
+}
+
+#-----------------------------------------------------------------------------
 # Summary
 #-----------------------------------------------------------------------------
 Write-SectionHeader "Summary" -Color Green
@@ -3244,6 +3591,7 @@ Write-Host "    - E5 Daily Data:    $(if ($collectedData.E5DailyIngestion) { "$(
 Write-Host "    - P2 Daily Data:    $(if ($collectedData.P2DailyIngestion) { "$($collectedData.P2DailyIngestion.Count) days (accurate benefit)" } else { 'Using averages' })" -ForegroundColor $(if ($collectedData.P2DailyIngestion) { 'Green' } else { 'Yellow' })
 Write-Host "    - Retention Data:   $(if ($collectedData.TableRetention -and $collectedData.TableRetention.Tables.Count -gt 0) { "$($collectedData.TableRetention.Tables.Count) tables" } else { 'Not available' })" -ForegroundColor $(if ($collectedData.TableRetention -and $collectedData.TableRetention.Tables.Count -gt 0) { 'Green' } else { 'Yellow' })
 Write-Host "    - Dedicated Cluster: $(if ($collectedData.DedicatedCluster) { if ($collectedData.DedicatedCluster.IsLinkedToCluster) { "Linked ($($collectedData.DedicatedCluster.ClusterName))" } else { 'Not linked' } } else { 'Not checked' })" -ForegroundColor $(if ($collectedData.DedicatedCluster -and $collectedData.DedicatedCluster.IsLinkedToCluster) { 'Green' } else { 'Yellow' })
+Write-Host "    - Actual Cost Data: $(if ($collectedData.ActualCostValidation -and $collectedData.ActualCostValidation.Success) { "$($collectedData.ActualCostValidation.Currency) $($collectedData.ActualCostValidation.MonthlyProjection)/month (projected)" } elseif ($collectedData.ActualCostValidation) { 'Not available (permissions)' } else { 'Not queried' })" -ForegroundColor $(if ($collectedData.ActualCostValidation -and $collectedData.ActualCostValidation.Success) { 'Green' } else { 'Yellow' })
 Write-Host ""
 
 # Show key findings
@@ -3295,6 +3643,22 @@ if ($collectedData.CostAnalysis) {
     # Add dedicated cluster finding
     if ($collectedData.CostAnalysis.DedicatedClusterRecommendation -and $collectedData.CostAnalysis.DedicatedClusterRecommendation.Recommended) {
         $findings += "DEDICATED CLUSTER recommended: Ingesting $(Format-DataSize $collectedData.CostAnalysis.DedicatedClusterRecommendation.CurrentDailyIngestion)/day - can aggregate commitment tiers across workspaces"
+    }
+
+    # Add actual cost validation finding
+    if ($collectedData.ActualCostValidation -and $collectedData.ActualCostValidation.Success -and $collectedData.ActualCostValidation.Comparison) {
+        $comparison = $collectedData.ActualCostValidation.Comparison
+        if ($comparison.ComparisonAvailable) {
+            if ($comparison.IsWithinTolerance) {
+                $findings += "Cost estimate validated: Estimate within $($comparison.TolerancePercent)% of actual billing ($($comparison.VariancePercent)% variance)"
+            } else {
+                if ($comparison.VariancePercent -gt 0) {
+                    $findings += "COST VALIDATION WARNING: Actual costs $([math]::Abs($comparison.VariancePercent))% higher than estimate - verify pricing in Azure Portal"
+                } else {
+                    $findings += "Cost validation: Actual costs $([math]::Abs($comparison.VariancePercent))% lower than estimate (may include unapplied discounts)"
+                }
+            }
+        }
     }
 
     if ($findings.Count -gt 0) {
