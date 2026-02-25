@@ -5482,37 +5482,166 @@ function ConvertTo-ReportHtml {
 <hr class="my-4">
 <h5 class="mt-4 mb-3" id="incident-volume"><span class="badge bg-warning text-dark me-2">$($incidentVolumeRules.Count)</span> Incident Volume by Rule (30 Days)</h5>
 <p class="text-muted small">Rules generating the most incidents over the last 30 days. High-volume rules may indicate tuning opportunities for false positive reduction.</p>
-<table class="table table-hover table-sm report-table" id="incidentVolumeTable">
-<thead><tr><th>Rule Name</th><th>Status</th><th>Severity</th><th>Trend (30d)</th><th>Incidents (30d)</th><th>Daily Avg</th><th>Weekly Avg</th></tr></thead>
+<table class="table table-hover table-sm report-table flyout-enabled" id="incidentVolumeTable">
+<thead><tr><th>Rule Name</th><th>Status</th><th>Severity</th><th>Trend (30d)</th><th>Incidents (30d)</th><th>Daily Avg</th><th>Weekly Avg</th><th class="col-flyout-icon"></th></tr></thead>
 <tbody>
 "@
+        # Build lookup hashtables for flyout data
+        $analyticsRuleLookup = @{}
+        foreach ($ar in $Data.AnalyticsRules) {
+            $arDisplayName = Get-SafeProperty (Get-SafeProperty $ar 'properties') 'displayName'
+            if ($arDisplayName) { $analyticsRuleLookup[$arDisplayName] = $ar }
+        }
+        $updateLookup = @{}
+        $ana001Check = $Data.HealthChecks | Where-Object { $_.CheckId -eq 'ANA-001' }
+        if ($ana001Check -and $ana001Check.Details) {
+            foreach ($upd in @($ana001Check.Details)) {
+                if ($upd.RuleName) { $updateLookup[$upd.RuleName] = $upd }
+            }
+        }
+
+        $incidentVolumeFlyoutData = @{}
+        $volIndex = 0
         foreach ($rule in ($incidentVolumeRules | Sort-Object { -[double]$_.DailyAverage })) {
-            $ruleName = if ($rule.RuleName) { [System.Web.HttpUtility]::HtmlEncode($rule.RuleName) } else { '-' }
-            $statusBadge = switch ($rule.RuleStatus) {
+            $volKey = "vol-$volIndex"
+            $volIndex++
+            $ruleNameRaw = Get-SafeProperty $rule 'RuleName'
+            $ruleName = if ($ruleNameRaw) { [System.Web.HttpUtility]::HtmlEncode($ruleNameRaw) } else { '-' }
+            $ruleStatus = Get-SafeProperty $rule 'RuleStatus'
+            $statusBadge = switch ($ruleStatus) {
                 'Active'   { '<span class="badge bg-success">Active</span>' }
                 'Disabled' { '<span class="badge bg-danger">Disabled</span>' }
                 'Deleted'  { '<span class="badge bg-secondary">Deleted</span>' }
                 default    { '<span class="badge bg-secondary">Unknown</span>' }
             }
-            $sevBadge = switch ($rule.Severity) {
+            $ruleSeverity = Get-SafeProperty $rule 'Severity'
+            $sevBadge = switch ($ruleSeverity) {
                 'High'          { '<span class="badge bg-danger">High</span>' }
                 'Medium'        { '<span class="badge bg-warning text-dark">Medium</span>' }
                 'Low'           { '<span class="badge bg-info">Low</span>' }
                 'Informational' { '<span class="badge bg-secondary">Info</span>' }
                 default         { '<span class="badge bg-secondary">-</span>' }
             }
-            $dailyCounts = if ($rule.DailyCounts) {
+            $dailyCountsRaw = Get-SafeProperty $rule 'DailyCounts'
+            $dailyCounts = if ($dailyCountsRaw) {
                 # DailyCounts comes as JSON string from KQL make-series, parse it to array
-                if ($rule.DailyCounts -is [string]) {
-                    @($rule.DailyCounts | ConvertFrom-Json)
+                if ($dailyCountsRaw -is [string]) {
+                    @($dailyCountsRaw | ConvertFrom-Json)
                 } else {
-                    @($rule.DailyCounts)
+                    @($dailyCountsRaw)
                 }
             } else { @() }
             $sparkline = Get-SparklineContainer -Values $dailyCounts
-            $incidentVolumeHtml += "<tr><td>$ruleName</td><td>$statusBadge</td><td>$sevBadge</td><td>$sparkline</td><td>$($rule.IncidentCount)</td><td>$($rule.DailyAverage)</td><td>$($rule.WeeklyAverage)</td></tr>"
+            $chevronTd = '<td class="col-flyout-icon"><i data-lucide="chevron-right" style="width:16px;height:16px;color:#94a3b8"></i></td>'
+            $ruleIncidentCount = Get-SafeProperty $rule 'IncidentCount'
+            $ruleDailyAverage = Get-SafeProperty $rule 'DailyAverage'
+            $ruleWeeklyAverage = Get-SafeProperty $rule 'WeeklyAverage'
+            $updateBadge = if ($ruleNameRaw -and $updateLookup.ContainsKey($ruleNameRaw)) { ' <span class="badge bg-warning text-dark ms-2">RULE UPDATE AVAILABLE</span>' } else { '' }
+            $incidentVolumeHtml += "<tr data-flyout-id=`"$volKey`"><td>$ruleName$updateBadge</td><td>$statusBadge</td><td>$sevBadge</td><td>$sparkline</td><td>$ruleIncidentCount</td><td>$ruleDailyAverage</td><td>$ruleWeeklyAverage</td>$chevronTd</tr>"
+
+            # Build flyout detail HTML
+            $flyoutHtml = ''
+
+            # Look up REST API rule for description, kind, tactics
+            $apiRule = if ($ruleNameRaw) { $analyticsRuleLookup[$ruleNameRaw] } else { $null }
+            $ruleDescription = '(No description available)'
+            $ruleKind = $null
+            $ruleTactics = @()
+            if ($apiRule) {
+                $apiProps = Get-SafeProperty $apiRule 'properties'
+                $desc = Get-SafeProperty $apiProps 'description'
+                if ($desc) { $ruleDescription = [System.Web.HttpUtility]::HtmlEncode($desc) }
+                $ruleKind = Get-SafeProperty $apiRule 'kind'
+                $tacticsRaw = Get-SafeProperty $apiProps 'tactics'
+                if ($tacticsRaw) { $ruleTactics = @($tacticsRaw) }
+            }
+
+            # Details section: Rule type and MITRE tactics
+            $flyoutHtml += '<dl class="row mb-0">'
+            $flyoutHtml += "<dt class=`"col-sm-4`">Rule Name</dt><dd class=`"col-sm-8`">$ruleName</dd>"
+            $flyoutHtml += "<dt class=`"col-sm-4`">Status</dt><dd class=`"col-sm-8`">$statusBadge</dd>"
+            $flyoutHtml += "<dt class=`"col-sm-4`">Severity</dt><dd class=`"col-sm-8`">$sevBadge</dd>"
+            if ($ruleKind) {
+                $kindBadge = switch ($ruleKind) {
+                    'Scheduled' { '<span class="badge bg-primary">Scheduled</span>' }
+                    'NRT'       { '<span class="badge bg-info">NRT</span>' }
+                    'Fusion'    { '<span class="badge bg-dark">Fusion</span>' }
+                    'MLBehaviorAnalytics' { '<span class="badge bg-dark">ML Behavior</span>' }
+                    'MicrosoftSecurityIncidentCreation' { '<span class="badge bg-secondary">MS Security</span>' }
+                    default     { "<span class=`"badge bg-secondary`">$ruleKind</span>" }
+                }
+                $flyoutHtml += "<dt class=`"col-sm-4`">Rule Type</dt><dd class=`"col-sm-8`">$kindBadge</dd>"
+            }
+            if ($ruleTactics.Count -gt 0) {
+                $tacticBadges = ($ruleTactics | ForEach-Object { "<span class=`"badge bg-outline-secondary me-1 mb-1`" style=`"border:1px solid #94a3b8;color:#475569`">$_</span>" }) -join ''
+                $flyoutHtml += "<dt class=`"col-sm-4`">MITRE Tactics</dt><dd class=`"col-sm-8`">$tacticBadges</dd>"
+            }
+            $flyoutHtml += '</dl>'
+
+            # Version section
+            $updateInfo = if ($ruleNameRaw) { $updateLookup[$ruleNameRaw] } else { $null }
+            if ($apiRule) {
+                $apiProps = Get-SafeProperty $apiRule 'properties'
+                $currentVersion = Get-SafeProperty $apiProps 'templateVersion'
+                if ($currentVersion) {
+                    $flyoutHtml += '<hr><span class="text-muted small text-uppercase fw-bold">Version</span>'
+                    $flyoutHtml += '<dl class="row mb-0 mt-2">'
+                    $flyoutHtml += "<dt class=`"col-sm-4`">Current Version</dt><dd class=`"col-sm-8`"><code>$currentVersion</code></dd>"
+                    if ($updateInfo) {
+                        $updTemplateVersion = Get-SafeProperty $updateInfo 'TemplateVersion'
+                        $updSource = Get-SafeProperty $updateInfo 'UpdateSource'
+                        $flyoutHtml += "<dt class=`"col-sm-4`">Update Status</dt><dd class=`"col-sm-8`"><span class=`"badge bg-warning text-dark`">Update Available</span></dd>"
+                        $flyoutHtml += "<dt class=`"col-sm-4`">Template Version</dt><dd class=`"col-sm-8`"><code>$updTemplateVersion</code></dd>"
+                        $flyoutHtml += "<dt class=`"col-sm-4`">Update Source</dt><dd class=`"col-sm-8`"><small>$([System.Web.HttpUtility]::HtmlEncode($updSource))</small></dd>"
+                    } else {
+                        $flyoutHtml += "<dt class=`"col-sm-4`">Update Status</dt><dd class=`"col-sm-8`"><span class=`"badge bg-success`">Up to date</span></dd>"
+                    }
+                    $flyoutHtml += '</dl>'
+                }
+            }
+
+            # 90-Day Trend section
+            $flyoutHtml += '<hr><span class="text-muted small text-uppercase fw-bold">90-Day Incident Trend</span>'
+            $dailyCounts90Raw = Get-SafeProperty $rule 'DailyCounts90'
+            $dailyCounts90 = if ($dailyCounts90Raw) {
+                if ($dailyCounts90Raw -is [string]) {
+                    @($dailyCounts90Raw | ConvertFrom-Json)
+                } else {
+                    @($dailyCounts90Raw)
+                }
+            } else { @() }
+
+            if ($dailyCounts90.Count -gt 0 -and ($dailyCounts90 | Measure-Object -Maximum).Maximum -gt 0) {
+                $sparkline90ValuesJson = ($dailyCounts90 -join ',')
+                $sparkline90 = "<span class=`"sparkline-data`" data-values=`"$sparkline90ValuesJson`" data-days=`"90`"></span>"
+                $total90 = ($dailyCounts90 | Measure-Object -Sum).Sum
+                $avg90 = [math]::Round($total90 / 90, 2)
+                $flyoutHtml += "<div class=`"mt-2 mb-2`">$sparkline90</div>"
+                $flyoutHtml += '<dl class="row mb-0">'
+                $flyoutHtml += "<dt class=`"col-sm-4`">Total (90d)</dt><dd class=`"col-sm-8`">$total90</dd>"
+                $flyoutHtml += "<dt class=`"col-sm-4`">Daily Avg (90d)</dt><dd class=`"col-sm-8`">$avg90</dd>"
+                $flyoutHtml += '</dl>'
+            } else {
+                $flyoutHtml += '<div class="mt-2 text-muted small">No data available</div>'
+            }
+
+            $incidentVolumeFlyoutData[$volKey] = @{
+                checkId     = 'INC-VOL'
+                checkName   = $ruleName
+                category    = 'Incident Volume'
+                status      = switch ($ruleStatus) {
+                    'Active'   { 'Info' }
+                    'Disabled' { 'Warning' }
+                    'Deleted'  { 'Critical' }
+                    default    { 'Info' }
+                }
+                description = $ruleDescription
+                detailsHtml = $flyoutHtml
+            }
         }
         $incidentVolumeHtml += "</tbody></table>"
+        $incidentVolumeFlyoutJson = ($incidentVolumeFlyoutData | ConvertTo-Json -Depth 10 -Compress) -replace '</', '<\/'
+        $incidentVolumeHtml += "`n<script type=`"application/json`" id=`"incidentVolumeTableFlyoutData`">$incidentVolumeFlyoutJson</script>"
     }
 
     # Build Rules with Updates table (from health check ANA-001)
@@ -5523,11 +5652,35 @@ function ConvertTo-ReportHtml {
 <h5 class="mt-4 mb-3" id="rules-updates"><span class="badge bg-info me-2">$(@($rulesWithUpdatesCheck.Details).Count)</span> Rules with Pending Updates</h5>
 <p class="text-muted small">Content Hub is the current source for Scheduled and NRT rule template updates. Rules showing &quot;Content Hub&quot; can be updated directly via the Sentinel GUI. Rules showing &quot;Built-in template&quot; are matched against the legacy alertRuleTemplates API only &mdash; install the corresponding Content Hub solution to receive future updates via the GUI. Fusion, ML Behavior Analytics, Microsoft Security, and Threat Intelligence rules are platform-managed and do not use Content Hub.</p>
 <table class="table table-hover table-sm report-table" id="rulesUpdatesTable">
-<thead><tr><th>Rule Name</th><th>Current Version</th><th>Available Version</th><th>Update Source</th></tr></thead>
+<thead><tr><th>Rule Name</th><th>Enabled</th><th>Incidents (30d)</th><th>Current Version</th><th>Available Version</th><th>Update Source</th></tr></thead>
 <tbody>
 "@
+        # Build lookup hashtables for enabled status and incident counts
+        $analyticsRuleLookupUpdates = @{}
+        foreach ($ar in $Data.AnalyticsRules) {
+            $arDisplayName = Get-SafeProperty (Get-SafeProperty $ar 'properties') 'displayName'
+            if ($arDisplayName) { $analyticsRuleLookupUpdates[$arDisplayName] = $ar }
+        }
+        $incidentCountLookup = @{}
+        if ($Data.IncidentVolumeByRule) {
+            foreach ($ivr in @($Data.IncidentVolumeByRule)) {
+                $ivrName = Get-SafeProperty $ivr 'RuleName'
+                if ($ivrName) { $incidentCountLookup[$ivrName] = Get-SafeProperty $ivr 'IncidentCount' }
+            }
+        }
+
         foreach ($rule in $rulesWithUpdatesCheck.Details) {
-            $rulesWithUpdatesHtml += "<tr><td>$([System.Web.HttpUtility]::HtmlEncode($rule.RuleName))</td><td><code>$($rule.CurrentVersion)</code></td><td><code>$($rule.TemplateVersion)</code></td><td>$([System.Web.HttpUtility]::HtmlEncode($rule.UpdateSource))</td></tr>"
+            # Enabled badge
+            $apiRule = if ($rule.RuleName) { $analyticsRuleLookupUpdates[$rule.RuleName] } else { $null }
+            if ($apiRule) {
+                $ruleEnabled = Get-SafeProperty (Get-SafeProperty $apiRule 'properties') 'enabled'
+                $enabledBadge = if ($ruleEnabled -eq $true) { '<span class="badge bg-success">Yes</span>' } else { '<span class="badge bg-danger">No</span>' }
+            } else {
+                $enabledBadge = '<span class="badge bg-secondary">-</span>'
+            }
+            # Incident count
+            $incidentCount = if ($rule.RuleName -and $incidentCountLookup.ContainsKey($rule.RuleName)) { $incidentCountLookup[$rule.RuleName] } else { 0 }
+            $rulesWithUpdatesHtml += "<tr><td>$([System.Web.HttpUtility]::HtmlEncode($rule.RuleName))</td><td>$enabledBadge</td><td>$incidentCount</td><td><code>$($rule.CurrentVersion)</code></td><td><code>$($rule.TemplateVersion)</code></td><td>$([System.Web.HttpUtility]::HtmlEncode($rule.UpdateSource))</td></tr>"
         }
         $rulesWithUpdatesHtml += "</tbody></table>"
     }
@@ -8945,23 +9098,23 @@ $datasetsJsStr
           options.order = [[1, 'desc']];
         }
 
-        // Sort incident volume table by Daily Avg (column 5) descending, Trend column (3) non-sortable
+        // Sort incident volume table by Daily Avg (column 5) descending, Trend column (3) and chevron column non-sortable
         if (tableId === 'incidentVolumeTable') {
           options.order = [[5, 'desc']];
-          options.columnDefs = [{ targets: 3, orderable: false, searchable: false }];
+          options.columnDefs = [{ targets: 3, orderable: false, searchable: false }, { targets: -1, orderable: false, searchable: false }];
           options.buttons = [
             {
               extend: 'copy',
               text: '<i data-lucide="copy" class="me-1" style="width:14px;height:14px"></i> Copy',
               className: 'btn',
-              exportOptions: { columns: ':not(:eq(3))' }
+              exportOptions: { columns: ':not(:eq(3)):not(:last-child)' }
             },
             {
               extend: 'excel',
               text: '<i data-lucide="file-spreadsheet" class="me-1" style="width:14px;height:14px"></i> Excel',
               className: 'btn',
               filename: '${ClientName}_' + fileName,
-              exportOptions: { columns: ':not(:eq(3))' }
+              exportOptions: { columns: ':not(:eq(3)):not(:last-child)' }
             }
           ];
         }
@@ -9035,20 +9188,22 @@ $datasetsJsStr
           var values = `$el.data('values');
           if (values) {
             var valuesArray = String(values).split(',').map(Number);
+            var days = parseInt(`$el.data('days')) || 30;
+            var useGlobalMax = (days === 30);
             `$el.sparkline(valuesArray, {
               type: 'bar',
               barColor: '#3b82f6',
               zeroColor: '#e2e8f0',
-              barWidth: 4,
-              barSpacing: 1,
-              height: '20px',
+              barWidth: days > 30 ? 2 : 4,
+              barSpacing: days > 30 ? 0 : 1,
+              height: days > 30 ? '28px' : '20px',
               chartRangeMin: 0,
-              chartRangeMax: sparklineGlobalMax || Math.max.apply(null, valuesArray),
+              chartRangeMax: useGlobalMax ? (sparklineGlobalMax || Math.max.apply(null, valuesArray)) : Math.max.apply(null, valuesArray),
               tooltipFormat: '<span style="color:#fff">Day {{offset}}: {{value}}</span>',
               tooltipValueLookups: {
                 'offset': (function() {
                   var lookup = {};
-                  for (var i = 0; i < 30; i++) lookup[i] = (30 - i);
+                  for (var i = 0; i < days; i++) lookup[i] = (days - i);
                   return lookup;
                 })()
               }
@@ -9082,6 +9237,8 @@ $datasetsJsStr
           if (data.detailsHtml) {
             section.style.display = '';
             content.innerHTML = data.detailsHtml;
+            initSparklines(`$(content));
+            lucide.createIcons();
           } else {
             section.style.display = 'none';
           }
@@ -9797,6 +9954,8 @@ _SentinelHealth()
             $incidentVolumeQuery = @"
 let LookbackDays = 30;
 let LookbackPeriod = ago(LookbackDays * 1d);
+let LookbackDays90 = 90;
+let LookbackPeriod90 = ago(LookbackDays90 * 1d);
 let RuleAuditStatus = _SentinelAudit()
     | where SentinelResourceType == "Analytic Rule"
     | extend Props = todynamic(ExtendedProperties)
@@ -9819,21 +9978,28 @@ let rules = SecurityAlert
     | mv-expand ExtendedProperties["Analytic Rule Ids"] to typeof(string)
     | extend RelatedAnalyticRuleIds = tostring(todynamic(['ExtendedProperties_Analytic Rule Ids'])[0])
     | summarize LastAlert = arg_max(TimeGenerated, RuleName, AlertSeverity) by RelatedAnalyticRuleIds;
-SecurityIncident
-| where TimeGenerated > LookbackPeriod
+let baseIncidents = SecurityIncident
+| where TimeGenerated > LookbackPeriod90
 | where Severity in ("Medium", "High")
 | where AdditionalData.alertProductNames has "Azure Sentinel"
 | where isnotempty(RelatedAnalyticRuleIds)
 | mv-expand RelatedAnalyticRuleIds to typeof(string)
-| where isnotempty(RelatedAnalyticRuleIds)
+| where isnotempty(RelatedAnalyticRuleIds);
+let series30 = baseIncidents
+| where TimeGenerated > LookbackPeriod
 | make-series DailyCounts = dcount(IncidentNumber) default=0 on TimeGenerated from LookbackPeriod to now() step 1d by RelatedAnalyticRuleIds
 | extend IncidentCount = toint(array_sum(DailyCounts))
 | extend DailyAverage = round(todouble(IncidentCount) / todouble(LookbackDays), 2)
-| extend WeeklyAverage = round(DailyAverage * 7, 2)
+| extend WeeklyAverage = round(DailyAverage * 7, 2);
+let series90 = baseIncidents
+| make-series DailyCounts90 = dcount(IncidentNumber) default=0 on TimeGenerated from LookbackPeriod90 to now() step 1d by RelatedAnalyticRuleIds
+| project RelatedAnalyticRuleIds, DailyCounts90;
+series30
+| join kind=leftouter series90 on RelatedAnalyticRuleIds
 | join kind=inner rules on RelatedAnalyticRuleIds
 | join kind=leftouter RuleAuditStatus on RuleName
 | extend RuleStatus = coalesce(RuleStatus, "Active")
-| project RuleName, RuleStatus, IncidentCount, DailyAverage, WeeklyAverage, Severity = AlertSeverity, DailyCounts
+| project RuleName, RuleStatus, IncidentCount, DailyAverage, WeeklyAverage, Severity = AlertSeverity, DailyCounts, DailyCounts90
 | order by DailyAverage desc
 "@
             $collectedData.IncidentVolumeByRule = Invoke-SentinelKqlQuery -WorkspaceId $workspaceId -Query $incidentVolumeQuery
