@@ -5499,6 +5499,19 @@ function ConvertTo-ReportHtml {
                 if ($upd.RuleName) { $updateLookup[$upd.RuleName] = $upd }
             }
         }
+        $templateLookup = @{}
+        foreach ($tpl in @($Data.AlertRuleTemplates)) {
+            $tplGuid = $tpl.name  # .name is the GUID on alert rule template objects
+            if ($tplGuid) { $templateLookup[$tplGuid] = $tpl }
+        }
+        $incidentDetailsLookup = @{}
+        foreach ($inc in @($Data.IncidentDetails)) {
+            $rn = Get-SafeProperty $inc 'RuleName'
+            if ($rn) {
+                if (-not $incidentDetailsLookup.ContainsKey($rn)) { $incidentDetailsLookup[$rn] = @() }
+                $incidentDetailsLookup[$rn] += $inc
+            }
+        }
 
         $incidentVolumeFlyoutData = @{}
         $volIndex = 0
@@ -5598,6 +5611,55 @@ function ConvertTo-ReportHtml {
                     }
                     $flyoutHtml += '</dl>'
                 }
+            }
+
+            # Template Info section
+            $templateGuid = if ($apiRule) { Get-SafeProperty (Get-SafeProperty $apiRule 'properties') 'alertRuleTemplateName' } else { $null }
+            if ($templateGuid -and $templateLookup.ContainsKey($templateGuid)) {
+                $tplProps        = Get-SafeProperty $templateLookup[$templateGuid] 'properties'
+                $tplDisplayName  = Get-SafeProperty $tplProps 'displayName'
+                if (-not $tplDisplayName) { $tplDisplayName = $templateGuid }
+                $tplNameEncoded  = [System.Web.HttpUtility]::HtmlEncode($tplDisplayName)
+                $ghSearchUrl     = "https://github.com/Azure/Azure-Sentinel/search?q=$([uri]::EscapeDataString($templateGuid))&type=code"
+                $flyoutHtml     += '<hr><span class="text-muted small text-uppercase fw-bold">Template</span>'
+                $flyoutHtml     += '<dl class="row mb-0 mt-2">'
+                $flyoutHtml     += "<dt class=`"col-sm-4`">Template Name</dt><dd class=`"col-sm-8`">$tplNameEncoded</dd>"
+                $flyoutHtml     += "<dt class=`"col-sm-4`">GitHub</dt><dd class=`"col-sm-8`"><a href=`"$ghSearchUrl`" target=`"_blank`" rel=`"noopener`">View on GitHub <i data-lucide=`"external-link`" style=`"width:12px;height:12px;vertical-align:middle`"></i></a></dd>"
+                $flyoutHtml     += '</dl>'
+            } elseif ($templateGuid) {
+                $flyoutHtml     += '<hr><span class="text-muted small text-uppercase fw-bold">Template</span>'
+                $flyoutHtml     += '<dl class="row mb-0 mt-2">'
+                $flyoutHtml     += "<dt class=`"col-sm-4`">Template ID</dt><dd class=`"col-sm-8`"><code>$([System.Web.HttpUtility]::HtmlEncode($templateGuid))</code></dd>"
+                $flyoutHtml     += '</dl>'
+            }
+
+            # Incident Details table section
+            $ruleIncidents = if ($ruleNameRaw) { $incidentDetailsLookup[$ruleNameRaw] } else { $null }
+            if ($ruleIncidents -and @($ruleIncidents).Count -gt 0) {
+                $flyoutHtml += '<hr><span class="text-muted small text-uppercase fw-bold">Incidents (Past 30 Days)</span>'
+                $flyoutHtml += '<div class="table-responsive mt-2"><table class="table table-sm table-hover small mb-0">'
+                $flyoutHtml += '<thead class="table-light"><tr><th>#</th><th>Title</th><th>Severity</th><th>Status</th><th>Date</th></tr></thead><tbody>'
+                foreach ($inc in @($ruleIncidents)) {
+                    $incNum    = [System.Web.HttpUtility]::HtmlEncode($inc.IncidentNumber)
+                    $incTitle  = [System.Web.HttpUtility]::HtmlEncode($inc.Title)
+                    $incSev    = [System.Web.HttpUtility]::HtmlEncode($inc.Severity)
+                    $incStatus = [System.Web.HttpUtility]::HtmlEncode($inc.Status)
+                    $incDate   = if ($inc.TimeGenerated) { ([datetime]$inc.TimeGenerated).ToString('yyyy-MM-dd') } else { '—' }
+                    $sevColor  = switch ($incSev) { 'High' { 'danger' } 'Medium' { 'warning' } 'Low' { 'secondary' } default { 'secondary' } }
+                    $incGuid   = $inc.IncidentName
+                    $incTitleHtml = if ($incGuid -and $Data.SubscriptionId -and $Data.ResourceGroupName -and $WorkspaceName) {
+                        $armId     = "/subscriptions/$($Data.SubscriptionId)/resourceGroups/$($Data.ResourceGroupName)/providers/Microsoft.OperationalInsights/workspaces/$WorkspaceName/providers/Microsoft.SecurityInsights/Incidents/$incGuid"
+                        $portalUrl = "https://portal.azure.com/#view/Microsoft_Azure_Security_Insights/IncidentPage.ReactView/incidentArmId/$([uri]::EscapeDataString($armId))"
+                        "<a href=`"$portalUrl`" target=`"_blank`" rel=`"noopener`">$incTitle</a>"
+                    } else { $incTitle }
+                    $flyoutHtml += "<tr><td><code>$incNum</code></td><td>$incTitleHtml</td>"
+                    $flyoutHtml += "<td><span class=`"badge bg-$sevColor`">$incSev</span></td>"
+                    $flyoutHtml += "<td>$incStatus</td><td class=`"text-nowrap`">$incDate</td></tr>"
+                }
+                $flyoutHtml += '</tbody></table></div>'
+            } else {
+                $flyoutHtml += '<hr><span class="text-muted small text-uppercase fw-bold">Incidents (Past 30 Days)</span>'
+                $flyoutHtml += '<p class="text-muted small mt-2 mb-0">No incident detail data available.</p>'
             }
 
             # 90-Day Trend section
@@ -9396,6 +9458,7 @@ $collectedData = @{
     AnalyticsExecutionDelays = $null
     AnalyticsAutoDisabled    = $null
     IncidentVolumeByRule     = $null
+    IncidentDetails          = $null
     AlertVolumeByRuleName    = $null
     # Agent Health (from Heartbeat and Operation tables)
     AgentHealthSummary       = $null
@@ -10005,6 +10068,33 @@ series30
             $collectedData.IncidentVolumeByRule = Invoke-SentinelKqlQuery -WorkspaceId $workspaceId -Query $incidentVolumeQuery
             if ($collectedData.IncidentVolumeByRule -and @($collectedData.IncidentVolumeByRule).Count -gt 0) {
                 Write-Host "      Incident volume: $(@($collectedData.IncidentVolumeByRule).Count) rules with incidents" -ForegroundColor Yellow
+            }
+
+            # Query 7: Individual Incident Details by Rule (30 Days, Medium/High only)
+            $incidentDetailsQuery = @"
+let LookbackPeriod = ago(30d);
+let rules = SecurityAlert
+    | where TimeGenerated > ago(365d)
+    | where ProviderName in ("ASI Scheduled Alerts", "ASI NRT Alerts")
+    | extend ExtendedProperties = todynamic(ExtendedProperties)
+    | extend RuleName = tostring(ExtendedProperties["Analytic Rule Name"])
+    | mv-expand ExtendedProperties["Analytic Rule Ids"] to typeof(string)
+    | extend RelatedAnalyticRuleIds = tostring(todynamic(['ExtendedProperties_Analytic Rule Ids'])[0])
+    | where isnotempty(RuleName) and isnotempty(RelatedAnalyticRuleIds)
+    | summarize arg_max(TimeGenerated, RuleName) by RelatedAnalyticRuleIds
+    | project RelatedAnalyticRuleIds, RuleName;
+SecurityIncident
+| where TimeGenerated > LookbackPeriod
+| where Severity in ("Medium", "High")
+| where isnotempty(RelatedAnalyticRuleIds)
+| mv-expand RelatedAnalyticRuleIds to typeof(string)
+| join kind=inner rules on RelatedAnalyticRuleIds
+| summarize arg_max(TimeGenerated, Title, Severity, Status, IncidentName) by RuleName, IncidentNumber
+| order by RuleName asc, TimeGenerated desc
+"@
+            $collectedData.IncidentDetails = Invoke-SentinelKqlQuery -WorkspaceId $workspaceId -Query $incidentDetailsQuery
+            if ($collectedData.IncidentDetails -and @($collectedData.IncidentDetails).Count -gt 0) {
+                Write-Host "      Incident details: $(@($collectedData.IncidentDetails).Count) incidents" -ForegroundColor Yellow
             }
         }
 
