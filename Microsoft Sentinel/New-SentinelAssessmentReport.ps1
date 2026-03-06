@@ -4424,11 +4424,20 @@ function Get-SolutionsWithUpdates {
         if (-not $contentId -or -not $installedVersion) { continue }
         if (-not $catalogLookup.ContainsKey($contentId)) { continue }
 
-        # For Standalone packages with a GUID contentId (analytics rule templates), only flag
-        # an update if the rule has actually been deployed in the workspace. Packages installed
-        # in Content Hub but never deployed produce noise that the portal also suppresses.
-        if ($contentKind -eq 'Standalone' -and $contentId -match $guidPattern) {
-            if (-not $deployedTemplateIds.ContainsKey($contentId)) { continue }
+        $supportObj  = Get-SafeProperty $pkg.properties 'support'
+        $supportTier = if ($supportObj) { Get-SafeProperty $supportObj 'tier' } else { $null }
+
+        if ($contentKind -eq 'Standalone') {
+            # Analytics rule packages (GUID contentId): only flag if the rule is deployed
+            if ($contentId -match $guidPattern) {
+                if (-not $deployedTemplateIds.ContainsKey($contentId)) { continue }
+            }
+            # Non-rule packages (workbooks etc., non-GUID contentId): only flag Community/Partner tier.
+            # Microsoft-tier standalone packages are auto-managed by the platform and the portal
+            # does not surface them as actionable updates.
+            else {
+                if ($supportTier -eq 'Microsoft') { continue }
+            }
         }
 
         $catalogEntry  = $catalogLookup[$contentId]
@@ -7715,11 +7724,22 @@ document.addEventListener('DOMContentLoaded', function() {
         $contentKind = Get-SafeProperty $pkgProps 'contentKind'
         $contentId   = Get-SafeProperty $pkgProps 'contentId'
 
+        $supportObj  = Get-SafeProperty $pkgProps 'support'
+        $supportTier = if ($supportObj) { Get-SafeProperty $supportObj 'tier' } else { $null }
+
         $statusBadge = '<span class="badge bg-success">Up to date</span>'
         if ($contentId -and $pkgCatalogLookup.ContainsKey($contentId) -and $version) {
-            # Suppress update badge for Standalone rule packages that haven't been deployed
-            $isUndeployedRule = $contentKind -eq 'Standalone' -and $contentId -match $hubGuidPattern -and -not $deployedRuleTemplateIds.ContainsKey($contentId)
-            if (-not $isUndeployedRule) {
+            $suppressUpdate = $false
+            if ($contentKind -eq 'Standalone') {
+                if ($contentId -match $hubGuidPattern) {
+                    # Analytics rule package: suppress if rule not deployed
+                    $suppressUpdate = -not $deployedRuleTemplateIds.ContainsKey($contentId)
+                } else {
+                    # Non-rule standalone (workbook etc.): suppress Microsoft-tier, portal auto-manages these
+                    $suppressUpdate = $supportTier -eq 'Microsoft'
+                }
+            }
+            if (-not $suppressUpdate) {
                 $latestVer = $pkgCatalogLookup[$contentId]
                 try {
                     if ([version]$latestVer -gt [version]$version) {
