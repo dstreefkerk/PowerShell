@@ -7687,6 +7687,14 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
+    # Build set of deployed analytics rule template GUIDs (for update suppression)
+    $deployedRuleTemplateIds = @{}
+    foreach ($ar in $Data.AnalyticsRules) {
+        $tmplId = Get-SafeProperty (Get-SafeProperty $ar 'properties') 'alertRuleTemplateName'
+        if ($tmplId) { $deployedRuleTemplateIds[$tmplId] = $true }
+    }
+    $hubGuidPattern = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+
     $contentHubHtml = @"
 <table class="table table-hover report-table" id="contentHubTable">
 <thead>
@@ -7709,13 +7717,17 @@ document.addEventListener('DOMContentLoaded', function() {
 
         $statusBadge = '<span class="badge bg-success">Up to date</span>'
         if ($contentId -and $pkgCatalogLookup.ContainsKey($contentId) -and $version) {
-            $latestVer = $pkgCatalogLookup[$contentId]
-            try {
-                if ([version]$latestVer -gt [version]$version) {
-                    $statusBadge = "<span class='badge bg-warning text-dark' title='Latest version: $latestVer'>Update Available</span>"
+            # Suppress update badge for Standalone rule packages that haven't been deployed
+            $isUndeployedRule = $contentKind -eq 'Standalone' -and $contentId -match $hubGuidPattern -and -not $deployedRuleTemplateIds.ContainsKey($contentId)
+            if (-not $isUndeployedRule) {
+                $latestVer = $pkgCatalogLookup[$contentId]
+                try {
+                    if ([version]$latestVer -gt [version]$version) {
+                        $statusBadge = "<span class='badge bg-warning text-dark' title='Latest version: $latestVer'>Update Available</span>"
+                    }
                 }
+                catch { <# version parse failure #> }
             }
-            catch { <# version parse failure #> }
         }
 
         $contentHubHtml += @"
