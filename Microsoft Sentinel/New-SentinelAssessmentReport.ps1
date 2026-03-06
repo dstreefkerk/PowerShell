@@ -716,6 +716,31 @@ function Get-SentinelContentPackages {
     return ,$allPackages
 }
 
+function Get-SentinelProductPackages {
+    <#
+    .SYNOPSIS
+    Retrieves the Content Hub product package catalog (all available solutions, including uninstalled).
+    Used to detect pending updates for installed solutions by comparing versions.
+    #>
+    param(
+        [string]$BaseUri,
+        [hashtable]$Headers
+    )
+
+    $uri = "$BaseUri/contentProductPackages?api-version=2025-03-01"
+    $allPackages = @()
+
+    do {
+        $response = Invoke-RestMethodWithRetry -Uri $uri -Method 'GET' -Headers $Headers
+        if ($response.value) {
+            $allPackages += $response.value
+        }
+        $uri = if ($response.PSObject.Properties['nextLink']) { $response.nextLink } else { $null }
+    } while ($uri)
+
+    return ,$allPackages
+}
+
 function Get-SentinelProductTemplates {
     <#
     .SYNOPSIS
@@ -3452,6 +3477,20 @@ function Invoke-AllHealthChecks {
         Details     = $legacyTemplateRules
     }
 
+    # HUB-001: Solutions with Pending Updates
+    if ($CollectedData.ContentPackages -and $CollectedData.ProductPackages -and @($CollectedData.ProductPackages).Count -gt 0) {
+        $solutionsWithUpdates = @(Get-SolutionsWithUpdates -ContentPackages $CollectedData.ContentPackages -ProductPackages $CollectedData.ProductPackages)
+        $checks += [PSCustomObject]@{
+            CheckId     = 'HUB-001'
+            CheckName   = 'Solutions with Pending Updates'
+            Category    = 'Content Hub'
+            Status      = if ($solutionsWithUpdates.Count -eq 0) { 'Pass' } else { 'Warning' }
+            Severity    = 'Warning'
+            Description = if ($solutionsWithUpdates.Count -eq 0) { 'All installed Content Hub solutions are up to date.' } else { "$(Format-Plural $solutionsWithUpdates.Count 'Content Hub solution') have updates available. Update via Content Hub to receive the latest detections and improvements." }
+            Details     = $solutionsWithUpdates
+        }
+    }
+
     # Analytics Health checks (from _SentinelHealth table, if available)
     if ($CollectedData.AnalyticsHealthSummary) {
         $healthSummary = @($CollectedData.AnalyticsHealthSummary)
@@ -4340,6 +4379,55 @@ function Get-LegacyTemplateRules {
     }
 
     foreach ($item in $results) { $item }
+}
+
+function Get-SolutionsWithUpdates {
+    <#
+    .SYNOPSIS
+    Compares installed Content Hub packages against the product catalog to find pending solution updates.
+    Returns objects with SolutionName, InstalledVersion, LatestVersion for each solution with an update available.
+    #>
+    param(
+        [array]$ContentPackages,
+        [array]$ProductPackages
+    )
+
+    # Build catalog lookup: contentId -> latest version + display name
+    $catalogLookup = @{}
+    foreach ($pkg in $ProductPackages) {
+        $contentId = Get-SafeProperty $pkg.properties 'contentId'
+        $version   = Get-SafeProperty $pkg.properties 'version'
+        $name      = Get-SafeProperty $pkg.properties 'displayName'
+        if ($contentId -and $version) {
+            $catalogLookup[$contentId] = @{ LatestVersion = $version; DisplayName = $name }
+        }
+    }
+
+    $results = @()
+    foreach ($pkg in $ContentPackages) {
+        $contentId        = Get-SafeProperty $pkg.properties 'contentId'
+        $installedVersion = Get-SafeProperty $pkg.properties 'version'
+        $displayName      = Get-SafeProperty $pkg.properties 'displayName'
+        if (-not $contentId -or -not $installedVersion) { continue }
+        if (-not $catalogLookup.ContainsKey($contentId)) { continue }
+
+        $catalogEntry  = $catalogLookup[$contentId]
+        $latestVersion = $catalogEntry.LatestVersion
+        $catalogName   = if ($catalogEntry.DisplayName) { $catalogEntry.DisplayName } else { $displayName }
+
+        try {
+            if ([version]$latestVersion -gt [version]$installedVersion) {
+                $results += [PSCustomObject]@{
+                    SolutionName      = if ($displayName) { $displayName } else { $catalogName }
+                    InstalledVersion  = $installedVersion
+                    LatestVersion     = $latestVersion
+                }
+            }
+        }
+        catch { <# version parse failure - skip #> }
+    }
+
+    return ,$results
 }
 
 function Get-VisibilityGaps {
@@ -7554,29 +7642,53 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     # Build Content Hub solutions table
+    # Build catalog lookup for update detection
+    $pkgCatalogLookup = @{}
+    foreach ($catalogPkg in $Data.ProductPackages) {
+        $catalogContentId = Get-SafeProperty $catalogPkg.properties 'contentId'
+        $catalogVersion   = Get-SafeProperty $catalogPkg.properties 'version'
+        if ($catalogContentId -and $catalogVersion) {
+            $pkgCatalogLookup[$catalogContentId] = $catalogVersion
+        }
+    }
+
     $contentHubHtml = @"
 <table class="table table-hover report-table" id="contentHubTable">
 <thead>
 <tr>
     <th>Solution Name</th>
-    <th>Version</th>
+    <th>Installed Version</th>
     <th>Content Kind</th>
+    <th>Status</th>
 </tr>
 </thead>
 <tbody>
 "@
 
     foreach ($package in $Data.ContentPackages) {
-        $pkgProps = Get-SafeProperty $package 'properties'
+        $pkgProps    = Get-SafeProperty $package 'properties'
         $displayName = Get-SafeProperty $pkgProps 'displayName'
-        $version = Get-SafeProperty $pkgProps 'version'
+        $version     = Get-SafeProperty $pkgProps 'version'
         $contentKind = Get-SafeProperty $pkgProps 'contentKind'
+        $contentId   = Get-SafeProperty $pkgProps 'contentId'
+
+        $statusBadge = '<span class="badge bg-success">Up to date</span>'
+        if ($contentId -and $pkgCatalogLookup.ContainsKey($contentId) -and $version) {
+            $latestVer = $pkgCatalogLookup[$contentId]
+            try {
+                if ([version]$latestVer -gt [version]$version) {
+                    $statusBadge = "<span class='badge bg-warning text-dark' title='Latest version: $latestVer'>Update Available</span>"
+                }
+            }
+            catch { <# version parse failure #> }
+        }
 
         $contentHubHtml += @"
 <tr>
     <td>$([System.Web.HttpUtility]::HtmlEncode($displayName))</td>
     <td>$version</td>
     <td>$contentKind</td>
+    <td>$statusBadge</td>
 </tr>
 "@
     }
@@ -9425,6 +9537,7 @@ $collectedData = @{
     DataConnectors     = @()
     ContentTemplates   = @()
     ContentPackages    = @()
+    ProductPackages    = @()
     ProductTemplates   = @()
     ProductTemplatesConnector = @()
     SourceControls     = @()
@@ -9517,6 +9630,13 @@ try {
     Write-Host "    Retrieved $($collectedData.ContentPackages.Count) content packages" -ForegroundColor Green
 }
 catch { Write-Warning "    Failed to fetch content packages: $_" }
+
+Write-Host "  Fetching product package catalog (for solution update detection)..." -ForegroundColor DarkGray
+try {
+    $collectedData.ProductPackages = Get-SentinelProductPackages -BaseUri $sentinelBaseUri -Headers $authHeader
+    Write-Host "    Retrieved $($collectedData.ProductPackages.Count) product packages" -ForegroundColor Green
+}
+catch { Write-Warning "    Failed to fetch product packages: $_" }
 
 Write-Host "  Fetching product template catalog..." -ForegroundColor DarkGray
 try {
