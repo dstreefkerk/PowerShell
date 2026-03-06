@@ -5513,6 +5513,11 @@ function ConvertTo-ReportHtml {
             $disabledRulesHtml += "<tr><td>$([System.Web.HttpUtility]::HtmlEncode($displayName))</td><td>$sevBadge</td><td>$($rule.kind)</td></tr>"
         }
         $disabledRulesHtml += "</tbody></table>"
+    } else {
+        $disabledRulesHtml = @"
+<h5 class="mt-4 mb-3" id="disabled-rules"><span class="badge bg-secondary me-2">0</span> Disabled Rules</h5>
+<p class="text-muted small"><span class="text-success">&#x2713;</span> No disabled rules found. All rules are currently enabled.</p>
+"@
     }
 
     # Build Custom Rules table (from health check ANA-004)
@@ -5833,6 +5838,11 @@ function ConvertTo-ReportHtml {
             $rulesWithUpdatesHtml += "<tr><td>$([System.Web.HttpUtility]::HtmlEncode($rule.RuleName))</td><td>$enabledBadge</td><td>$incidentCount</td><td><code>$($rule.CurrentVersion)</code></td><td><code>$($rule.TemplateVersion)</code></td><td>$([System.Web.HttpUtility]::HtmlEncode($rule.UpdateSource))</td></tr>"
         }
         $rulesWithUpdatesHtml += "</tbody></table>"
+    } else {
+        $rulesWithUpdatesHtml = @"
+<h5 class="mt-4 mb-3" id="rules-updates"><span class="badge bg-secondary me-2">0</span> Rules with Pending Updates</h5>
+<p class="text-muted small"><span class="text-success">&#x2713;</span> No pending rule updates found. All template-based rules are up to date.</p>
+"@
     }
 
     # Build Legacy Template Rules section (from health check ANA-008)
@@ -5871,6 +5881,11 @@ function ConvertTo-ReportHtml {
             $legacyTemplateHtml += "<tr><td>$([System.Web.HttpUtility]::HtmlEncode($rule.RuleName))</td><td>$([System.Web.HttpUtility]::HtmlEncode($rule.RuleKind))</td><td>$sevBadge</td><td>$([System.Web.HttpUtility]::HtmlEncode($rule.SolutionName))</td></tr>"
         }
         $legacyTemplateHtml += "</tbody></table>"
+    } else {
+        $legacyTemplateHtml = @"
+<h5 class="mt-4 mb-3" id="legacy-templates"><span class="badge bg-secondary me-2">0</span> Legacy Template Rules</h5>
+<p class="text-muted small"><span class="text-success">&#x2713;</span> No legacy template rules found. All template-based rules are managed via Content Hub.</p>
+"@
     }
 
     # Build Analytics Health section (from ANAH health checks)
