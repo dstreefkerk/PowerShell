@@ -3479,7 +3479,7 @@ function Invoke-AllHealthChecks {
 
     # HUB-001: Solutions with Pending Updates
     if ($CollectedData.ContentPackages -and $CollectedData.ProductPackages -and @($CollectedData.ProductPackages).Count -gt 0) {
-        $solutionsWithUpdates = @(Get-SolutionsWithUpdates -ContentPackages $CollectedData.ContentPackages -ProductPackages $CollectedData.ProductPackages)
+        $solutionsWithUpdates = @(Get-SolutionsWithUpdates -ContentPackages $CollectedData.ContentPackages -ProductPackages $CollectedData.ProductPackages -AnalyticsRules $CollectedData.AnalyticsRules)
         $checks += [PSCustomObject]@{
             CheckId     = 'HUB-001'
             CheckName   = 'Solutions with Pending Updates'
@@ -4386,11 +4386,21 @@ function Get-SolutionsWithUpdates {
     .SYNOPSIS
     Compares installed Content Hub packages against the product catalog to find pending solution updates.
     Returns objects with SolutionName, InstalledVersion, LatestVersion for each solution with an update available.
+    Standalone packages whose contentId is a GUID (analytics rules) are only included when the rule is
+    actually deployed in the workspace, matching portal update-count behaviour.
     #>
     param(
         [array]$ContentPackages,
-        [array]$ProductPackages
+        [array]$ProductPackages,
+        [array]$AnalyticsRules
     )
+
+    # Build set of deployed alertRuleTemplateName GUIDs
+    $deployedTemplateIds = @{}
+    foreach ($rule in $AnalyticsRules) {
+        $tmplId = Get-SafeProperty $rule.properties 'alertRuleTemplateName'
+        if ($tmplId) { $deployedTemplateIds[$tmplId] = $true }
+    }
 
     # Build catalog lookup: contentId -> latest version + display name
     $catalogLookup = @{}
@@ -4403,13 +4413,23 @@ function Get-SolutionsWithUpdates {
         }
     }
 
+    $guidPattern = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+
     $results = @()
     foreach ($pkg in $ContentPackages) {
         $contentId        = Get-SafeProperty $pkg.properties 'contentId'
         $installedVersion = Get-SafeProperty $pkg.properties 'version'
         $displayName      = Get-SafeProperty $pkg.properties 'displayName'
+        $contentKind      = Get-SafeProperty $pkg.properties 'contentKind'
         if (-not $contentId -or -not $installedVersion) { continue }
         if (-not $catalogLookup.ContainsKey($contentId)) { continue }
+
+        # For Standalone packages with a GUID contentId (analytics rule templates), only flag
+        # an update if the rule has actually been deployed in the workspace. Packages installed
+        # in Content Hub but never deployed produce noise that the portal also suppresses.
+        if ($contentKind -eq 'Standalone' -and $contentId -match $guidPattern) {
+            if (-not $deployedTemplateIds.ContainsKey($contentId)) { continue }
+        }
 
         $catalogEntry  = $catalogLookup[$contentId]
         $latestVersion = $catalogEntry.LatestVersion
