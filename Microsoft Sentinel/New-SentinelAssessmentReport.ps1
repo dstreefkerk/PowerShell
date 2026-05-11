@@ -3302,14 +3302,14 @@ function Invoke-AllHealthChecks {
     }
 
     # CON-001: Connectors with Updates
-    $connectorsWithUpdates = @(Get-ConnectorsWithUpdates -Connectors $CollectedData.DataConnectors -ContentTemplates $CollectedData.ContentTemplates)
+    $connectorsWithUpdates = Get-ConnectorsWithUpdates -Connectors $CollectedData.DataConnectors -ContentTemplates $CollectedData.ContentTemplates
     $checks += [PSCustomObject]@{
         CheckId     = 'CON-001'
         CheckName   = 'Connectors with Updates'
         Category    = 'Data Connectors'
         Status      = if ($connectorsWithUpdates.Count -eq 0) { 'Pass' } else { 'Warning' }
         Severity    = 'Warning'
-        Description = if ($connectorsWithUpdates.Count -eq 0) { 'All data connectors are up to date.' } else { "$(Format-Plural $connectorsWithUpdates.Count 'connector') have pending updates available." }
+        Description = if ($connectorsWithUpdates.Count -eq 0) { 'All data connectors are up to date.' } else { "$(Format-Plural $connectorsWithUpdates.Count 'connector') $(if ($connectorsWithUpdates.Count -eq 1) { 'has' } else { 'have' }) pending updates available." }
         Details     = $connectorsWithUpdates
     }
 
@@ -3360,7 +3360,7 @@ function Invoke-AllHealthChecks {
             Category    = 'Data Connectors'
             Status      = if ($staleConnectors.Count -eq 0) { 'Pass' } else { 'Warning' }
             Severity    = 'Warning'
-            Description = if ($staleConnectors.Count -eq 0) { 'All connectors have received data in the last 24 hours.' } else { "$(Format-Plural $staleConnectors.Count 'connector') have not received data in 24+ hours." }
+            Description = if ($staleConnectors.Count -eq 0) { 'All connectors have received data in the last 24 hours.' } else { "$(Format-Plural $staleConnectors.Count 'connector') $(if ($staleConnectors.Count -eq 1) { 'has' } else { 'have' }) not received data in 24+ hours." }
             Details     = $staleConnectors
         }
     }
@@ -3373,7 +3373,7 @@ function Invoke-AllHealthChecks {
         Category    = 'Analytics Rules'
         Status      = if ($rulesWithUpdates.Count -eq 0) { 'Pass' } else { 'Warning' }
         Severity    = 'Warning'
-        Description = if ($rulesWithUpdates.Count -eq 0) { 'All analytics rules are up to date.' } else { "$(Format-Plural $rulesWithUpdates.Count 'rule') have newer template versions available." }
+        Description = if ($rulesWithUpdates.Count -eq 0) { 'All analytics rules are up to date.' } else { "$(Format-Plural $rulesWithUpdates.Count 'rule') $(if ($rulesWithUpdates.Count -eq 1) { 'has' } else { 'have' }) a newer template version available." }
         Details     = $rulesWithUpdates
     }
 
@@ -3479,14 +3479,14 @@ function Invoke-AllHealthChecks {
 
     # HUB-001: Solutions with Pending Updates
     if ($CollectedData.ContentPackages -and $CollectedData.ProductPackages -and @($CollectedData.ProductPackages).Count -gt 0) {
-        $solutionsWithUpdates = @(Get-SolutionsWithUpdates -ContentPackages $CollectedData.ContentPackages -ProductPackages $CollectedData.ProductPackages -AnalyticsRules $CollectedData.AnalyticsRules)
+        $solutionsWithUpdates = Get-SolutionsWithUpdates -ContentPackages $CollectedData.ContentPackages -ProductPackages $CollectedData.ProductPackages -AnalyticsRules $CollectedData.AnalyticsRules
         $checks += [PSCustomObject]@{
             CheckId     = 'HUB-001'
             CheckName   = 'Solutions with Pending Updates'
             Category    = 'Content Hub'
             Status      = if ($solutionsWithUpdates.Count -eq 0) { 'Pass' } else { 'Warning' }
             Severity    = 'Warning'
-            Description = if ($solutionsWithUpdates.Count -eq 0) { 'All installed Content Hub solutions are up to date.' } else { "$(Format-Plural $solutionsWithUpdates.Count 'Content Hub solution') have updates available. Update via Content Hub to receive the latest detections and improvements." }
+            Description = if ($solutionsWithUpdates.Count -eq 0) { 'All installed Content Hub solutions are up to date.' } else { "$(Format-Plural $solutionsWithUpdates.Count 'Content Hub solution') $(if ($solutionsWithUpdates.Count -eq 1) { 'has' } else { 'have' }) updates available. Update via Content Hub to receive the latest detections and improvements." }
             Details     = $solutionsWithUpdates
         }
     }
